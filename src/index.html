@@ -81,29 +81,18 @@
   #btnUndo:disabled { color: #b9b9b9; }
   /* 그룹 구분선 */
   .tb-sep { width: 1px; height: 24px; background: #e6e8eb; flex: 0 0 auto; }
-  /* 체크박스 토글 → 필 버튼 (활성 시 검정 필 + 흰 글자) */
-  #toolbar label.tb-toggle {
-    display: flex; align-items: center; height: 32px; padding: 0 13px; gap: 6px;
-    border: 1px solid #d9dce1; border-radius: 999px; font-size: 12px; color: #1f2937;
-    cursor: pointer; user-select: none; background: #fff; font-weight: 500;
-    transition: background .12s, border-color .12s;
-  }
-  #toolbar label.tb-toggle:hover { background: #f4f5f7; border-color: #c3c8cf; }
-  #toolbar label.tb-toggle:has(input:checked) { background: #17181c; border-color: #17181c; color: #fff; }
-  #toolbar label.tb-toggle input { display: none; }
-  #toolbar label.tb-toggle::before { content: '○'; font-size: 10px; line-height: 1; opacity: .55; }
-  #toolbar label.tb-toggle:has(input:checked)::before { content: '●'; opacity: 1; }
-  #toolbar button#btnUnavailMode { border-radius: 999px; }
-  #toolbar button#btnUnavailMode.active { background: #17181c; color: #fff; border-color: #17181c; }
+  /* 모드 토글 버튼(필 모양, 활성 시 검정 필 + 흰 글자) */
+  #toolbar button.tb-mode { border-radius: 999px; }
+  #toolbar button.tb-mode.active { background: #17181c; border-color: #17181c; color: #fff; }
+  #toolbar button.tb-mode.active:hover { background: #17181c; border-color: #17181c; }
   #toolbar input[type=text] { font-size: 12px; height: 32px; padding: 0 11px; border: 1px solid #d9dce1; border-radius: 10px; width: 210px; }
   #toolbar input[type=text]:disabled { background: #eee; color: #999; }
   #toolbar select { font-size: 12px; height: 32px; padding: 0 8px; border: 1px solid #d9dce1; border-radius: 10px; background: #fff; color: #1f2937; }
-  #unclassified { font-size: 12px; color: #b3261e; font-weight: 600; }
+  #toolbarNote { font-size: 12px; color: #b3261e; font-weight: 600; }
   #groupHint { font-size: 12px; color: #2f5fa8; font-weight: 600; }
   #sheetNote { font-size: 11px; color: #888; }
   #userInfo { margin-left: auto; font-size: 11px; color: #999; }
   body.dev-mode #btnLogout { display: none; }   /* 개발 모드에는 로그인 개념이 없다 */
-  #raToggle, #setModeToggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #555; }
 
   /* 그리드 */
   /* 그리드가 자체 스크롤 컨테이너: 헤더행 sticky 고정 + 가로/세로 스크롤바 항상 표시 */
@@ -138,8 +127,6 @@
   table.grid tr.ra-row td.filled:hover { outline: none; }
   body.show-ra table.grid tr.ra-row { display: table-row; }
   table.grid thead th.slot-h { cursor: default; }
-  body.set-mode table.grid thead th.slot-h { cursor: pointer; }
-  body.set-mode table.grid thead th.slot-h:hover { background: #dfe8f5; }
   table.grid th.day-start, table.grid td.day-start { border-left: 3px double #6b7684; }
   table.grid tr.dept-start th, table.grid tr.dept-start td { border-top: 3px double #6b7684; }
   table.grid thead th.blk-all { background: #f3c6c6; color: #8a2b2b; }
@@ -217,7 +204,10 @@
   /* 설정 모달(중앙) */
   #settings {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 720px; max-width: 92vw; max-height: 85vh;
+    width: 720px; max-width: 92vw;
+    /* 높이 고정 — 탭마다 내용 길이가 달라도 창(=탭 바) 위치가 흔들리지 않는다.
+       길이 차이는 #settingsBody 스크롤이 흡수한다. */
+    height: min(85vh, 760px);
     background: #fff; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.25); z-index: 55;
     display: none; flex-direction: column;
   }
@@ -226,8 +216,8 @@
   #settings > header h2 { margin: 0; font-size: 15px; flex: 1; }
   #settings .x-close { border: none; background: none; font-size: 18px; line-height: 1; color: #888; cursor: pointer; padding: 2px 6px; }
   #settings .x-close:hover { color: #333; }
-  #settings .tabbar { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid #ddd; }
-  #settings .tabbar button { border: none; background: none; padding: 9px 12px; font-size: 13px; color: #555; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  #settings .tabbar { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid #ddd; overflow-x: auto; }
+  #settings .tabbar button { border: none; background: none; padding: 9px 8px; font-size: 13px; color: #555; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
   #settings .tabbar button:hover { color: #2f5fa8; }
   #settings .tabbar button.active { color: #2f5fa8; font-weight: 700; border-bottom-color: #2f5fa8; }
   #settingsBody { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
@@ -334,20 +324,6 @@
     background: #f2f2f2; color: #666; border: 1px solid #ddd; border-radius: 6px; cursor: pointer;
   }
   .ra-revert:hover { background: #e8e8e8; }
-  /* 공강 현황 모달(중앙, #settings 미러) */
-  #gradeFree {
-    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 720px; max-width: 92vw; max-height: 85vh;
-    background: #fff; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.25); z-index: 55;
-    display: none; flex-direction: column;
-  }
-  #gradeFree.open { display: flex; }
-  #gradeFree > header { padding: 12px 16px; border-bottom: 1px solid #ddd; display: flex; align-items: center; gap: 10px; }
-  #gradeFree > header strong { flex: 1; font-size: 15px; }
-  #gradeFree .x-close { border: none; background: none; font-size: 18px; line-height: 1; color: #888; cursor: pointer; padding: 2px 6px; }
-  #gradeFree .x-close:hover { color: #333; }
-  #gradeFree .gh-grades button.active { background: #2b6cb0; color: #fff; border-color: #2b6cb0; font-weight: 700; }
-  #gradeFree .muted { color: #999; font-size: 12px; }
 
   /* 연결 그룹 카드 */
   .chip { display: inline-flex; align-items: center; gap: 4px; background: #eef1f5; color: #2f5fa8;
@@ -368,21 +344,6 @@
   .grp-align.bad { color: #b3261e; }
   #settings.grp-peek { opacity: 0.08; pointer-events: none; transition: opacity .15s; }
   body.peeking #backdrop { background: transparent; }
-
-  /* 슬롯 금지 팝업 */
-  #slotPop {
-    display: none; position: fixed; z-index: 65; left: 50%; top: 84px; transform: translateX(-50%);
-    background: #fff; border: 1px solid #bbb; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.2);
-    padding: 14px 16px; width: 360px; max-width: 94vw;
-  }
-  #slotPop.on { display: block; }
-  #slotPop h3 { margin: 0 0 8px; font-size: 14px; }
-  #slotPop .grp { margin: 8px 0; }
-  #slotPop label { display: inline-block; margin: 2px 8px 2px 0; font-size: 12px; }
-  #slotPop input[type=text] { font-size: 12px; padding: 3px 6px; border: 1px solid #bbb; border-radius: 4px; }
-  #slotPop button { font-size: 12px; padding: 5px 12px; border: 1px solid #bbb; background: #fff; border-radius: 4px; cursor: pointer; }
-  #slotPop button.primary { background: #2f5fa8; color: #fff; border-color: #2f5fa8; }
-  #slotPop .btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 
   /* RA 감독 배정 팝업 */
   #raAssign {
@@ -445,13 +406,11 @@
   <button id="btnRefresh" type="button" class="tb-icon" title="새로고침 — 시트 최신 상태 다시 불러오기">&#x27F3;</button>
   <button id="btnUndo" type="button" class="tb-icon" title="되돌리기 (Ctrl+Z)" disabled>&#x21A9;</button>
   <button id="btnSettings" type="button" class="tb-icon" title="설정">⚙️</button>
-  <button id="btnGradeFree" type="button">공강 현황</button>
   <span class="tb-sep"></span>
-  <label id="setModeToggle" class="tb-toggle" title="설정 모드 — 그리드에서 금지 슬롯 등을 편집"><input type="checkbox" id="setModeCheck"> 설정 모드</label>
-  <button id="btnUnavailMode" type="button" title="교사 불가 시간 등록 모드">불가 시간</button>
-  <label id="raToggle" class="tb-toggle" title="RA행 표시/숨김"><input type="checkbox" id="raCheck"> RA행</label>
+  <button id="btnUnavailMode" type="button" class="tb-mode" title="교사 불가 시간 등록 모드">불가 시간</button>
+  <button id="btnRaRows" type="button" class="tb-mode" title="RA행 표시/숨김" aria-pressed="false">RA행</button>
   <span id="groupHint"></span>
-  <span id="unclassified"></span>
+  <span id="toolbarNote"></span>
   <span id="sheetNote"></span>
   <span id="userInfo"></span>
   <button id="btnLogout" type="button" title="로그아웃 — 이 브라우저의 로그인 정보를 지웁니다">로그아웃</button>
@@ -489,24 +448,13 @@
     <button type="button" data-tab="team">팀티칭</button>
     <button type="button" data-tab="unavail">불가 시간</button>
     <button type="button" data-tab="pinned">고정 수업</button>
+    <button type="button" data-tab="gradefree">공강 현황</button>
   </div>
   <div id="settingsBody"></div>
-  <footer>
+  <footer id="settingsFooter">
     <button id="btnSaveSettings" class="primary" type="button">저장</button>
   </footer>
 </div>
-
-<div id="gradeFree">
-  <header>
-    <strong>학년별 공강 현황</strong>
-    <button id="btnCloseGradeFree" class="x-close" type="button" aria-label="닫기">✕</button>
-  </header>
-  <div id="gradeFreeNote" class="muted" style="padding:4px 14px 0"></div>
-  <div id="gradeFreeGrades" style="padding:8px 14px"></div>
-  <div id="gradeFreeBody" style="padding:0 14px 14px"></div>
-</div>
-
-<div id="slotPop"></div>
 
 <div id="raAssign">
   <header>
@@ -766,7 +714,6 @@ function loadCores() {
 var STATE = {
   sheetId: '', dataStart: 3, sheets: [], electives: {}, depts: null,
   grid: null, config: null, version: null, configVersion: null, tab: null, model: null, user: '',
-  setMode: false,
   unavailMode: false, unavailDirty: false,
   warnings: [], linkedPinned: {},
   target: null, plan: null, planTo: null, cellMap: null,
@@ -858,14 +805,12 @@ function enterApp() {
 
 /* 로그아웃 시 열려 있는 모달/오버레이와 모드 표시를 되돌린다(DOM 전용). */
 function closeOverlays() {
-  ['settings', 'gradeFree', 'raAssign'].forEach(function (id) {
+  ['settings', 'raAssign'].forEach(function (id) {
     document.getElementById(id).classList.remove('open');
   });
-  document.getElementById('slotPop').classList.remove('on');
   document.getElementById('backdrop').classList.remove('on');
   document.getElementById('btnUnavailMode').classList.remove('active');
-  document.getElementById('setModeCheck').checked = false;
-  document.body.classList.remove('set-mode', 'unavail-mode');
+  document.body.classList.remove('unavail-mode');
 }
 
 /* @logout-start
@@ -893,7 +838,7 @@ function doLogout() {
   STATE.target = null; STATE.plan = null; STATE.planTo = null; STATE.cellMap = null;
   STATE.undoStack = [];
   STATE.grid = null; STATE.config = null; STATE.model = null; STATE.user = '';
-  STATE.setMode = false; STATE.unavailMode = false; STATE.unavailDirty = false;
+  STATE.unavailMode = false; STATE.unavailDirty = false;
   DRAFT = null;
   SETTINGS_DIRTY = false;
 
@@ -1048,7 +993,7 @@ function onState(data) {
   show('toolbar', true, 'flex');
   show('gridWrap', true);
   renderGrid();
-  updateUnclassified();
+  updateToolbarNote();
   setGroupHint('');
   renderGradeFreeIfOpen();
 }
@@ -1258,9 +1203,6 @@ function renderGrid() {
     STATE.cellMap[cellKey(+td.dataset.erow, +td.dataset.idx)] = td;
     td.addEventListener('click', onCellClick);
   });
-  wrap.querySelectorAll('th.slot-h').forEach(function (th) {
-    th.addEventListener('click', onHeaderClick);
-  });
   wrap.querySelectorAll('td.gfr-all,td.gfr-some,td.gfr-partial').forEach(function (td) {
     td.addEventListener('click', function () {
       openRaAssign(+td.dataset.day, +td.dataset.period, +td.dataset.grade);
@@ -1305,27 +1247,17 @@ function fitCells() {
 function cellAt(row, idx) { return STATE.cellMap[cellKey(row, idx)]; }
 function paint(row, idx, colorCls) { var td = cellAt(row, idx); if (td) td.classList.add(colorCls); }
 
-function updateUnclassified() {
-  var unclEl = document.getElementById('unclassified');
+/* 툴바 알림: 설정 탭 없음 안내(최우선) 또는 고정시간 인식불가 경고.
+   미분류 과목 수는 표시하지 않는다 — 설정 > 무반 과목/공강 현황 탭에서 확인한다. */
+function updateToolbarNote() {
+  var el = document.getElementById('toolbarNote');
   if (STATE.config && STATE.config.missing) {
-    unclEl.textContent = "설정 탭이 없습니다 — [설정]에서 규칙을 저장하면 생성됩니다";
+    el.textContent = '설정 탭이 없습니다 — [설정]에서 규칙을 저장하면 생성됩니다';
     return;
   }
-  var n = 0;
-  STATE.model.entries.forEach(function (e) {
-    if (e.type !== 'teacher') return;
-    for (var i = 0; i < SLOT_COUNT; i++) {
-      var s = e.slots[i];
-      if (!s) continue;
-      var t = expandTargets(s, STATE.config);
-      if (t.unclassified) n++;
-    }
-  });
-  var baseText = n ? ('미분류 ' + n) : '';
-  var warn = (STATE.warnings && STATE.warnings.length)
+  el.textContent = (STATE.warnings && STATE.warnings.length)
     ? '고정시간 인식불가: ' + STATE.warnings.join(', ')
     : '';
-  unclEl.textContent = [baseText, warn].filter(Boolean).join(' · ');
 }
 
 function setGroupHint(t) { document.getElementById('groupHint').textContent = t || ''; }
@@ -1363,7 +1295,6 @@ function onCellClick(ev) {
     return;
   }
   if (STATE.unavailMode) { toggleUnavail(erow, idx); return; }
-  if (STATE.setMode) return; // 설정 모드에서는 셀 이동 비활성
   if (td.classList.contains('cand') && STATE.target) { selectPlan(idx); return; }
   if (td.classList.contains('pinned')) {
     var entry = STATE.model.entries.find(function (e) { return e.row === erow; });
@@ -1410,11 +1341,6 @@ function toggleUnavailMode() {
   STATE.unavailDirty = false;
   btn.classList.add('active');
   document.body.classList.add('unavail-mode');
-  if (STATE.setMode) { // 설정 모드와 상호 배타
-    STATE.setMode = false;
-    document.getElementById('setModeCheck').checked = false;
-    document.body.classList.remove('set-mode');
-  }
   clearSelection();
 }
 
@@ -1565,7 +1491,7 @@ function confirmPlan() {
     STATE.undoStack.push(undoEntry);
     updateUndoButton();
     renderGrid();
-    updateUnclassified();
+    updateToolbarNote();
     setGroupHint('');
     renderGradeFreeIfOpen();
   }).catch(function (err) {
@@ -1640,7 +1566,7 @@ function doUndo() {
     STATE.undoStack.pop();
     updateUndoButton();
     renderGrid();
-    updateUnclassified();
+    updateToolbarNote();
     setGroupHint('');
     renderGradeFreeIfOpen();
     if (isRaAssignOpen()) renderRaAssign();
@@ -1729,83 +1655,6 @@ function toast(msg) {
   if (TOAST_TIMER) clearTimeout(TOAST_TIMER);
   TOAST_TIMER = setTimeout(function () { el.classList.remove('on'); }, 2000);
 }
-
-/* =========================================================
-   F2: 슬롯 금지 팝업 (열 헤더 클릭)
-   ========================================================= */
-function onHeaderClick(ev) {
-  if (!STATE.setMode) return;
-  var idx = parseInt(ev.currentTarget.getAttribute('data-idx'), 10);
-  if (isNaN(idx)) return;
-  openSlotPopup(idx);
-}
-
-function openSlotPopup(idx) {
-  var slot = indexToSlot(idx);
-  var existing = blockAtIdx(idx);
-  var eg = existing ? (existing.grades === 'all' ? [7, 8, 9, 10, 11, 12] : (existing.grades || [])) : [];
-  var ec = existing ? (existing.classes || []) : [];
-  var html = '<h3>' + esc(slotLabel(idx)) + ' 금지 슬롯 설정</h3>';
-  html += '<div class="grp"><b>학년(전체)</b><br>';
-  [7, 8, 9, 10, 11, 12].forEach(function (g) {
-    html += '<label><input type="checkbox" class="sp-grade" value="' + g + '"' + (eg.indexOf(g) !== -1 ? ' checked' : '') + '> ' + g + '</label>';
-  });
-  html += '</div><div class="grp"><b>개별 반</b><br>';
-  [7, 8, 9, 10, 11, 12].forEach(function (g) {
-    ['A', 'B', 'C'].forEach(function (c) {
-      var cl = g + c;
-      html += '<label><input type="checkbox" class="sp-cls" value="' + cl + '"' + (ec.indexOf(cl) !== -1 ? ' checked' : '') + '> ' + cl + '</label>';
-    });
-    html += '<br>';
-  });
-  html += '</div><div class="grp"><b>라벨</b> <input type="text" id="spLabel" value="' + esc(existing ? (existing.label || '') : '') + '" placeholder="예: 전교 조회"></div>';
-  html += '<div class="btns">';
-  if (existing) html += '<button id="spClear" type="button">삭제</button>';
-  html += '<button id="spCancel" type="button">취소</button>';
-  html += '<button id="spSave" class="primary" type="button">저장</button></div>';
-
-  var pop = document.getElementById('slotPop');
-  pop.innerHTML = html;
-  pop.classList.add('on');
-  document.getElementById('backdrop').classList.add('on');
-  document.getElementById('spCancel').onclick = closeSlotPopup;
-  document.getElementById('spSave').onclick = function () { saveSlotBlock(idx, slot); };
-  if (existing) document.getElementById('spClear').onclick = function () { removeSlotBlock(idx); };
-}
-
-function closeSlotPopup() {
-  document.getElementById('slotPop').classList.remove('on');
-  if (!document.getElementById('settings').classList.contains('open')) {
-    document.getElementById('backdrop').classList.remove('on');
-  }
-}
-
-function saveSlotBlock(idx, slot) {
-  var pop = document.getElementById('slotPop');
-  var grades = [];
-  pop.querySelectorAll('.sp-grade:checked').forEach(function (x) { grades.push(parseInt(x.value, 10)); });
-  var allCls = [];
-  pop.querySelectorAll('.sp-cls:checked').forEach(function (x) { allCls.push(x.value); });
-  // 학년 전체가 선택되면 그 학년의 개별 반은 생략(grades 우선)
-  var classes = allCls.filter(function (cl) { return grades.indexOf(parseInt(cl, 10)) === -1; });
-  var label = (document.getElementById('spLabel').value || '').trim();
-
-  var config = cloneConfig(STATE.config);
-  config.fixedBlocks = (config.fixedBlocks || []).filter(function (b) { return (b.day * 8 + (b.period - 1)) !== idx; });
-  if (grades.length || classes.length || label) {
-    config.fixedBlocks.push({ day: slot.day, period: slot.period, label: label, grades: grades, classes: classes });
-  }
-  closeSlotPopup();
-  postConfig(config);
-}
-
-function removeSlotBlock(idx) {
-  var config = cloneConfig(STATE.config);
-  config.fixedBlocks = (config.fixedBlocks || []).filter(function (b) { return (b.day * 8 + (b.period - 1)) !== idx; });
-  closeSlotPopup();
-  postConfig(config);
-}
-
 /* =========================================================
    설정 패널 (F1 삭제목록 / F3 연결그룹 / F4 무반 / 팀티칭)
    ========================================================= */
@@ -1869,6 +1718,8 @@ function buildDraftFromConfig() {
   };
 }
 
+function isSettingsOpen() { return document.getElementById('settings').classList.contains('open'); }
+
 function openSettings() {
   buildDraftFromConfig();
   SETTINGS_TAB = 'block';
@@ -1881,9 +1732,7 @@ function openSettings() {
 function closeSettings() {
   if (SETTINGS_DIRTY && !confirm('저장하지 않은 변경이 있습니다. 닫을까요?')) return;
   document.getElementById('settings').classList.remove('open');
-  if (!document.getElementById('slotPop').classList.contains('on')) {
-    document.getElementById('backdrop').classList.remove('on');
-  }
+  if (!isRaAssignOpen()) document.getElementById('backdrop').classList.remove('on');
 }
 
 function applySettingsTab() {
@@ -1894,8 +1743,17 @@ function applySettingsTab() {
   document.querySelectorAll('#settingsTabs button').forEach(function (b) {
     b.classList.toggle('active', b.getAttribute('data-tab') === SETTINGS_TAB);
   });
+  // 공강 현황은 조회 전용 탭이라 [저장]이 할 일이 없다 → 푸터를 숨긴다.
+  document.getElementById('settingsFooter').style.display = (SETTINGS_TAB === 'gradefree') ? 'none' : '';
 }
-function switchSettingsTab(tab) { SETTINGS_TAB = tab; applySettingsTab(); }
+function switchSettingsTab(tab) {
+  SETTINGS_TAB = tab;
+  applySettingsTab();
+  renderGradeFreeIfOpen();   // 공강 현황 탭으로 들어올 때 최신 상태로 그린다
+  // 이전 탭에서 스크롤해 둔 위치가 남아 새 탭이 중간부터 보이는 것을 막는다.
+  var body = document.getElementById('settingsBody');
+  if (body) body.scrollTop = 0;
+}
 
 function blockRowHtml(b, bi, dupIdx) {
   var grades = b.grades || [], partialGrades = b.partialGrades || [], classes = b.classes || [];
@@ -1915,7 +1773,6 @@ function blockRowHtml(b, bi, dupIdx) {
   h += '<input type="text" data-f="blabel" data-i="' + bi + '" value="' + esc(b.label || '') + '" placeholder="예: 전교 조회">';
   if (isAll) h += '<span class="blk-badge-all">전 학년 금지</span>';
   else if (grades.length || partialGrades.length || classes.length) h += '<span class="blk-badge-part">일부</span>';
-  h += '<button data-act="delBlock" data-i="' + bi + '" style="margin-left:auto">삭제</button>';
   h += '</div>';
 
   // 2행: 대상 칩 + 추가
@@ -1931,6 +1788,7 @@ function blockRowHtml(b, bi, dupIdx) {
   });
   if (!grades.length && !partialGrades.length && !classes.length) h += '<span class="muted">대상 없음</span>';
   h += '<button data-act="fbOpen" data-i="' + bi + '" style="margin-left:auto">+ 추가</button>';
+  h += '<button data-act="delBlock" data-i="' + bi + '">삭제</button>';
   h += '</div>';
 
   // 인라인 경고
@@ -2645,7 +2503,14 @@ function gradeFreeNote() {
   el.textContent = n ? ('미분류 ' + n + '과목은 판정에서 제외됨') : '';
 }
 function renderGradeFree() {
-  document.getElementById('gradeFreeGrades').innerHTML = gradeFreeGradesHtml();
+  var grades = document.getElementById('gradeFreeGrades');
+  if (!grades || !STATE.model) return;   // 설정 모달의 '공강 현황' 탭이 렌더된 뒤에만 동작
+  grades.innerHTML = gradeFreeGradesHtml();
+  // 재렌더마다 컨테이너가 새로 생기므로 addEventListener 대신 onclick(멱등)으로 건다.
+  grades.onclick = function (ev) {
+    var g = ev.target.getAttribute && ev.target.getAttribute('data-g');
+    if (g) { GF_UI.grade = parseInt(g, 10); renderGradeFree(); }
+  };
   document.getElementById('gradeFreeBody').innerHTML = gradeFreeMatrixHtml();
   gradeFreeNote();
   document.querySelectorAll('#gradeFreeBody td.gf-all, #gradeFreeBody td.gf-some, #gradeFreeBody td.gf-part').forEach(function (td) {
@@ -2665,20 +2530,9 @@ function renderGradeFree() {
     });
   });
 }
-function isGradeFreeOpen() { return document.getElementById('gradeFree').classList.contains('open'); }
+/* 공강 현황은 설정 모달의 탭이다 — 그 탭이 보일 때만 다시 그린다(조회 전용, DIRTY 아님). */
+function isGradeFreeOpen() { return isSettingsOpen() && SETTINGS_TAB === 'gradefree'; }
 function renderGradeFreeIfOpen() { if (isGradeFreeOpen()) renderGradeFree(); }
-function openGradeFree() {
-  if (document.getElementById('settings').classList.contains('open')) return;
-  renderGradeFree();
-  document.getElementById('backdrop').classList.add('on');
-  document.getElementById('gradeFree').classList.add('open');
-}
-function closeGradeFree() {
-  document.getElementById('gradeFree').classList.remove('open');
-  if (!document.getElementById('slotPop').classList.contains('on')) {
-    document.getElementById('backdrop').classList.remove('on');
-  }
-}
 
 /* =========================================================
    RA 감독 배정 — 공강 셀 클릭 → 후보 배정/해제 (POST /api/apply)
@@ -2745,11 +2599,7 @@ function openRaAssign(day, period, grade) {
 
 function closeRaAssign() {
   document.getElementById('raAssign').classList.remove('open');
-  if (!isGradeFreeOpen()
-    && !document.getElementById('slotPop').classList.contains('on')
-    && !document.getElementById('settings').classList.contains('open')) {
-    document.getElementById('backdrop').classList.remove('on');
-  }
+  if (!isSettingsOpen()) document.getElementById('backdrop').classList.remove('on');
 }
 
 // 후보 목록(시수 표시) HTML — 반/일부 모드 공용
@@ -2885,7 +2735,7 @@ function raApplyOp(kind, ops, undoEntry, successMsg) {
     if (undoEntry) STATE.undoStack.push(undoEntry);
     updateUndoButton();
     renderGrid();
-    updateUnclassified();
+    updateToolbarNote();
     renderGradeFreeIfOpen();
     if (isRaAssignOpen()) renderRaAssign();
     if (successMsg) toast(successMsg);
@@ -3146,9 +2996,9 @@ function renderSettings() {
   Object.keys(blkCount).forEach(function (k) { if (blkCount[k] > 1) blkDup[k] = true; });
   var blkKey = function (idx) { var b = DRAFT.fixedBlocks[idx]; return b.day * 8 + (b.period - 1); };
   var blkOrder = DRAFT.fixedBlocks.map(function (b, i) { return i; }).sort(function (a, b) { return blkKey(a) - blkKey(b); });
-  html += '<div class="sec" data-tab="block"><h3>금지 슬롯 규칙 <span class="muted h-help">특정 요일·교시에 배정을 금지합니다. 그리드 상단 \'설정 모드\'를 켜고 열 머리글을 클릭해도 지정할 수 있습니다.</span></h3>';
+  html += '<div class="sec" data-tab="block"><h3>금지 슬롯 규칙 <span class="muted h-help">특정 요일·교시에 배정을 금지합니다. \'학년별 시간\' 탭에서 학년 관점의 매트릭스로도 편집할 수 있습니다.</span></h3>';
   html += '<div class="row"><button data-act="addBlock">+ 규칙 추가</button></div>';
-  if (!DRAFT.fixedBlocks.length) html += '<div class="muted">등록된 규칙이 없습니다. "+ 규칙 추가" 버튼 또는 "설정 모드"에서 열 헤더 클릭으로 추가하세요.</div>';
+  if (!DRAFT.fixedBlocks.length) html += '<div class="muted">등록된 규칙이 없습니다. "+ 규칙 추가" 버튼 또는 \'학년별 시간\' 탭에서 추가하세요.</div>';
   blkOrder.forEach(function (bi) { html += blockRowHtml(DRAFT.fixedBlocks[bi], bi, blkDup); });
   html += '</div>';
 
@@ -3216,11 +3066,19 @@ function renderSettings() {
   DRAFT.pinned.forEach(function (pc, ci) { html += pinnedCardHtml(pc, ci, gridSet); });
   html += '</div>';
 
+  // 공강 현황 (조회 전용 — DRAFT 를 건드리지 않는다. 내용은 renderGradeFree 가 채운다)
+  html += '<div class="sec" data-tab="gradefree"><h3>학년별 공강 현황 <span class="muted h-help">조회 전용입니다. 공강 칸을 클릭하면 RA 감독을 배정하고, 방과후/정규 칸을 클릭하면 정규 수업시간 등록을 전환합니다.</span></h3>';
+  html += '<div id="gradeFreeNote" class="muted"></div>';
+  html += '<div id="gradeFreeGrades" style="margin:8px 0"></div>';
+  html += '<div id="gradeFreeBody"></div>';
+  html += '</div>';
+
   var _sbody = document.getElementById('settingsBody');
   var _sTop = _sbody.scrollTop;
   _sbody.innerHTML = html;
   _sbody.scrollTop = _sTop; // 재렌더 후 스크롤 위치 유지
   applySettingsTab();
+  renderGradeFreeIfOpen();
 }
 
 function onSettingsClick(ev) {
@@ -3432,23 +3290,13 @@ window.addEventListener('load', function () {
   document.getElementById('btnRefresh').addEventListener('click', function () { clearUndoStack(); loadState(STATE.sheetId, STATE.tab); });
   document.getElementById('btnUndo').addEventListener('click', doUndo);
   document.getElementById('btnSettings').addEventListener('click', openSettings);
-  document.getElementById('btnGradeFree').addEventListener('click', openGradeFree);
-  document.getElementById('btnCloseGradeFree').addEventListener('click', closeGradeFree);
   document.getElementById('btnCloseRaAssign').addEventListener('click', closeRaAssign);
   document.getElementById('raAssignBody').addEventListener('click', onRaAssignBodyClick);
-  document.getElementById('gradeFreeGrades').addEventListener('click', function (ev) {
-    var g = ev.target.getAttribute && ev.target.getAttribute('data-g');
-    if (g) { GF_UI.grade = parseInt(g, 10); renderGradeFree(); }
-  });
-  document.getElementById('setModeCheck').addEventListener('change', function (ev) {
-    if (ev.target.checked && STATE.unavailMode) exitUnavailMode(); // 상호 배타(불가 모드 저장 후 종료)
-    STATE.setMode = ev.target.checked;
-    document.body.classList.toggle('set-mode', ev.target.checked);
-    if (ev.target.checked) clearSelection();
-  });
   document.getElementById('btnUnavailMode').addEventListener('click', toggleUnavailMode);
-  document.getElementById('raCheck').addEventListener('change', function (ev) {
-    document.body.classList.toggle('show-ra', ev.target.checked);
+  document.getElementById('btnRaRows').addEventListener('click', function () {
+    var on = document.body.classList.toggle('show-ra');
+    this.classList.toggle('active', on);
+    this.setAttribute('aria-pressed', on ? 'true' : 'false');
     fitCells();
   });
   document.getElementById('btnConfirm').addEventListener('click', confirmPlan);
@@ -3473,9 +3321,7 @@ window.addEventListener('load', function () {
   });
   document.getElementById('backdrop').addEventListener('click', function () {
     if (isRaAssignOpen()) { closeRaAssign(); return; }
-    if (document.getElementById('slotPop').classList.contains('on')) closeSlotPopup();
-    if (isGradeFreeOpen()) closeGradeFree();
-    if (document.getElementById('settings').classList.contains('open')) closeSettings();
+    if (isSettingsOpen()) closeSettings();
   });
 
   document.addEventListener('keydown', function (ev) {
@@ -3490,9 +3336,7 @@ window.addEventListener('load', function () {
     }
     if (ev.key !== 'Escape') return;
     if (isRaAssignOpen()) { closeRaAssign(); return; }
-    if (document.getElementById('slotPop').classList.contains('on')) { closeSlotPopup(); return; }
-    if (isGradeFreeOpen()) { closeGradeFree(); return; }
-    if (document.getElementById('settings').classList.contains('open')) { closeSettings(); return; }
+    if (isSettingsOpen()) { closeSettings(); return; }
     clearSelection();
   });
 

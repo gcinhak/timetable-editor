@@ -2093,7 +2093,7 @@ await (async function () {
     const STATE = Object.assign({
       target: null, plan: null, planTo: null, cellMap: null, undoStack: [],
       grid: null, config: null, model: null, user: 'a@b.c',
-      setMode: false, unavailMode: false, unavailDirty: false
+      unavailMode: false, unavailDirty: false
     }, o.state || {});
 
     const api = new Function(
@@ -2126,7 +2126,7 @@ await (async function () {
   check('로그아웃: 오버레이 정리', h.env.overlaysClosed === 1);
 
   // (2) 진행 중 상태 정리
-  h = build({ state: { plan: { steps: [1] }, undoStack: [{ summary: 'x' }], user: 'me@x.org', setMode: true }, draft: { fixedBlocks: [] } });
+  h = build({ state: { plan: { steps: [1] }, undoStack: [{ summary: 'x' }], user: 'me@x.org' }, draft: { fixedBlocks: [] } });
   h.doLogout();   // plan 이 있으므로 confirm → 기본 build 는 confirmYes=false
   check('로그아웃: 미확정 이동 계획이면 확인 대화상자', h.env.confirms.length === 1 && /저장하지 않은 변경이 있습니다/.test(h.env.confirms[0]));
   check('로그아웃: 확인 거부하면 토큰 유지', h.env.stored.idToken === 'ID_TOKEN');
@@ -2134,12 +2134,12 @@ await (async function () {
   check('로그아웃: 확인 거부하면 계획도 유지', h.STATE.plan !== null);
 
   // (3) 확인 수락 → 진행 중 상태까지 정리된다
-  h = build({ confirmYes: true, state: { plan: { steps: [1] }, undoStack: [{ summary: 'x' }], setMode: true, unavailMode: true }, draft: { fixedBlocks: [] }, settingsDirty: true });
+  h = build({ confirmYes: true, state: { plan: { steps: [1] }, undoStack: [{ summary: 'x' }], unavailMode: true }, draft: { fixedBlocks: [] }, settingsDirty: true });
   h.doLogout();
   check('로그아웃: 확인 수락 시 ID 토큰 삭제', h.env.stored.idToken === '');
   check('로그아웃: STATE.plan 정리', h.STATE.plan === null && h.STATE.target === null && h.STATE.planTo === null);
   check('로그아웃: 되돌리기 스택 비움', h.STATE.undoStack.length === 0);
-  check('로그아웃: 모드 해제', h.STATE.setMode === false && h.STATE.unavailMode === false);
+  check('로그아웃: 모드 해제', h.STATE.unavailMode === false);
   check('로그아웃: 사용자 정보 제거', h.STATE.user === '');
   check('로그아웃: 설정 초안 정리', h.draft() === null && h.settingsDirty() === false);
 
@@ -2186,6 +2186,74 @@ await (async function () {
   });
   // renderNoAccess 는 ID 토큰에서 이메일을 얻는다
   check('renderNoAccess 계정 표시에 idTokenEmail 사용', /STATE\.user \|\| idTokenEmail\(\)/.test(html));
+})();
+
+/* =========================================================
+   툴바 정리(index.html 정적 검증)
+   — 설정 모드 삭제 / RA행 버튼 토글 / 미분류 카운트 삭제 / 공강 현황 탭
+   ========================================================= */
+(function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+
+  // (1) '설정 모드'가 UI·상태·분기 어디에도 남아 있지 않다
+  check('설정 모드 토글 마크업 제거', !/setModeToggle|setModeCheck/.test(html));
+  check('STATE.setMode 상태 제거', !/setMode/.test(html));
+  check('body.set-mode 스타일/토글 제거', !/set-mode/.test(html));
+  // 설정 모드에서만 도달하던 슬롯 금지 팝업(열 머리글 클릭) 경로가 통째로 제거됐다
+  check('열 머리글 클릭 핸들러 제거', !/onHeaderClick/.test(html));
+  check('슬롯 금지 팝업(slotPop) 잔재 없음', !/slotPop|SlotPopup|saveSlotBlock|removeSlotBlock/.test(html));
+  // 안내 문구가 사라진 '설정 모드'를 더 이상 가리키지 않는다
+  const blockSecStart = html.indexOf('data-tab="block"><h3>금지 슬롯 규칙');
+  const blockSec = html.slice(blockSecStart, html.indexOf('data-tab="gradehours"><h3>', blockSecStart));
+  check('금지 슬롯 안내 문구에서 설정 모드 언급 제거', blockSec.length > 0 && !/설정 모드/.test(blockSec));
+
+  // (2) RA행: 체크박스가 아니라 '불가 시간'과 같은 모드 버튼
+  check('RA행 체크박스 제거', !/id="raCheck"/.test(html));
+  check('RA행 모드 버튼 마크업', /<button id="btnRaRows" type="button" class="tb-mode"/.test(html));
+  check('RA행/불가 시간 버튼 스타일 통일(tb-mode)', /id="btnUnavailMode" type="button" class="tb-mode"/.test(html)
+    && /#toolbar button\.tb-mode\.active/.test(html));
+  const raBind = html.slice(html.indexOf("getElementById('btnRaRows')"), html.indexOf("getElementById('btnConfirm')"));
+  check('RA행 버튼이 show-ra 를 토글', /classList\.toggle\('show-ra'\)/.test(raBind));
+  check('RA행 버튼이 active 상태를 표시', /classList\.toggle\('active', on\)/.test(raBind));
+  check('RA행 버튼이 셀 크기 재계산(fitCells) 호출', /fitCells\(\)/.test(raBind));
+  check('RA행 표시 CSS 유지', /body\.show-ra table\.grid tr\.ra-row \{ display: table-row; \}/.test(html));
+
+  // (3) 툴바에서 '미분류 N'은 사라지되, 설정 탭 없음 안내와 경고는 남는다
+  const noteFn = html.slice(html.indexOf('function updateToolbarNote()'), html.indexOf('function setGroupHint'));
+  check('툴바 알림 함수 존재', noteFn.length > 0);
+  check('툴바에서 미분류 카운트 제거', !/미분류/.test(noteFn));
+  check('설정 탭 없음 안내 유지', /설정 탭이 없습니다 — \[설정\]에서 규칙을 저장하면 생성됩니다/.test(noteFn));
+  check('고정시간 인식불가 경고 유지', /고정시간 인식불가: /.test(noteFn));
+  check('툴바 알림 엘리먼트 마크업/스타일', /<span id="toolbarNote"><\/span>/.test(html)
+    && /#toolbarNote \{[^}]*color: #b3261e/.test(html));
+  // 공강 현황 안의 '미분류 N과목은 판정에서 제외됨'은 별개 표시라 그대로 남는다
+  check('공강 현황의 미분류 안내는 유지', /미분류 ' \+ n \+ '과목은 판정에서 제외됨/.test(html));
+
+  // (4) 공강 현황: 독립 모달 → 설정 모달의 8번째 탭
+  check('공강 현황 독립 모달 제거', !/id="gradeFree"|btnGradeFree|btnCloseGradeFree|openGradeFree|closeGradeFree/.test(html));
+  const tabbar = html.slice(html.indexOf('<div id="settingsTabs"'), html.indexOf('<div id="settingsBody">'));
+  const tabs = tabbar.match(/data-tab="([a-z]+)"/g) || [];
+  check('설정 탭이 8개', tabs.length === 8);
+  check('공강 현황 탭이 마지막', tabs[7] === 'data-tab="gradefree"' && /공강 현황<\/button>/.test(tabbar));
+  check('공강 현황 섹션이 설정 본문에 렌더됨', /class="sec" data-tab="gradefree"/.test(html)
+    && /id="gradeFreeNote"/.test(html) && /id="gradeFreeGrades"/.test(html) && /id="gradeFreeBody"/.test(html));
+  // 조회 전용 탭에서는 [저장] 푸터를 숨긴다
+  check('공강 현황 탭에서 저장 푸터 숨김',
+    /getElementById\('settingsFooter'\)\.style\.display = \(SETTINGS_TAB === 'gradefree'\) \? 'none' : ''/.test(html));
+  // 보기만 해도 dirty 가 되면 안 된다 — 렌더 경로에 SETTINGS_DIRTY 대입이 없다
+  const gfRender = html.slice(html.indexOf('function renderGradeFree()'), html.indexOf('function isGradeFreeOpen()'));
+  check('공강 현황 렌더가 SETTINGS_DIRTY 를 건드리지 않음', gfRender.length > 0 && !/SETTINGS_DIRTY/.test(gfRender));
+  check('공강 현황 열림 판정이 설정 탭 기준', /SETTINGS_TAB === 'gradefree'/.test(html)
+    && /function isGradeFreeOpen\(\) \{ return isSettingsOpen\(\) && SETTINGS_TAB === 'gradefree'; \}/.test(html));
+  check('탭 전환 시 공강 현황 재렌더', /applySettingsTab\(\);\n  renderGradeFreeIfOpen\(\);/.test(html));
+  // RA 감독 배정 흐름이 설정 모달 위에서도 뜬다(z-index) — 그리고 닫아도 설정의 백드롭은 남는다
+  check('RA 배정 팝업이 설정 모달보다 위(z-index)', /#raAssign \{[\s\S]*?z-index: 60;/.test(html)
+    && /#settings \{[\s\S]*?z-index: 55;/.test(html));
+  check('RA 배정 닫을 때 설정이 열려 있으면 백드롭 유지',
+    /function closeRaAssign\(\) \{[\s\S]*?if \(!isSettingsOpen\(\)\) document\.getElementById\('backdrop'\)\.classList\.remove\('on'\);/.test(html));
+  // 그리드의 공강 행에서 들어가는 RA 배정 경로는 그대로 살아 있다
+  check('그리드 공강 행 → RA 배정 경로 유지', /td\.gfr-all,td\.gfr-some,td\.gfr-partial/.test(html)
+    && /openRaAssign\(\+td\.dataset\.day, \+td\.dataset\.period, \+td\.dataset\.grade\)/.test(html));
 })();
 
 console.log('');
