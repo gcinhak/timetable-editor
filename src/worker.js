@@ -414,9 +414,14 @@ async function handleConfig(sf, sheetId, body) {
   if (typeof body.baseConfigVersion === 'undefined') {
     return json({ ok: false, error: 'missing_base_version', reasons: ['설정 버전이 필요합니다. 새로고침 후 다시 시도하세요.'] }, 400);
   }
+  // 저장 전 설정 조회(낙관적 락 기준)와 연결그룹 조회는 서로 의존하지 않는다 → 병렬.
+  // readLinkedPinned 는 저장 결과 응답(pinned/무반 파생)에만 쓰이며 설정 저장에 영향을 주지 않는다.
+  const [cur, lp] = await Promise.all([
+    readConfigWithVersion(sf, sheetsList),
+    readLinkedPinned(sf, sheetsList)
+  ]);
   // 조회 실패를 "설정 탭 없음"(빈 해시)으로 위장하면 낙관적 락이 무의미해지고
   // 설정 전체가 소거된다. 실패면 저장 자체를 거부한다.
-  const cur = await readConfigWithVersion(sf, sheetsList);
   if (cur.unavailable) {
     return json({
       ok: false, error: 'config_unavailable',
@@ -426,15 +431,33 @@ async function handleConfig(sf, sheetId, body) {
   if (body.baseConfigVersion !== cur.version) {
     return json({ ok: false, error: 'stale_config', reasons: ['다른 사용자가 설정을 변경했습니다. 새로고침 후 다시 시도하세요.'] }, 409);
   }
+  let listAfter = sheetsList;
   if (!sheetsList.some(function (s) { return s.title === TAB_CONFIG; })) {
     await addSheet(sf, TAB_CONFIG);
+    // 아래 재조회가 "탭 없음"으로 오판하지 않도록 목록에 반영(추가 왕복 없이).
+    listAfter = sheetsList.concat([{ sheetId: null, title: TAB_CONFIG, index: sheetsList.length }]);
   }
   const values = CORE.serializeConfig(body.config || {});
   // clear 없이 A:C 범위만 단일 batchUpdate 로 덮어쓴다.
   // (1) clear→write 사이의 "설정 탭이 빈 채로 남는" 구간 제거
   // (2) D열 이후의 메모·보조 데이터 보존
   await overwriteSheetRange(sf, TAB_CONFIG, values, 3, (cur.raw || []).length);
-  return json({ ok: true });
+
+  // 저장 결과를 시트에서 되읽어 확정한다. 로컬에서 해시를 추정하지 않는다 —
+  // configVersion 은 다음 저장의 낙관적 락 기준이므로 반드시 "실제 시트에 있는 값"의 해시여야 한다
+  // (Sheets 는 후행 빈 행·빈 셀을 잘라 돌려주므로 기록한 2D 와 읽은 2D 가 일치하지 않는다).
+  const after = await readConfigWithVersion(sf, listAfter);
+  if (after.unavailable) {
+    // 저장은 성공했지만 확정 조회에 실패 → 신뢰할 수 없는 config/configVersion 을 내려보내지 않는다.
+    // 클라이언트는 reload:true 를 보고 /api/state 로 전체를 다시 받는다(화면·시트 어긋남 방지).
+    return json({ ok: true, reload: true });
+  }
+  CORE.resolvePinned(after.config, lp.pinned);
+  deriveClasslessFromGrades(after.config, lp.grades);
+  return json({
+    ok: true, sheetId: sheetId, config: after.config, configVersion: after.version,
+    warnings: lp.warnings, pinnedSource: after.config.pinnedSource, linkedPinned: lp.pinned
+  });
 }
 
 /* =========================================================
@@ -556,7 +579,15 @@ function handleConfigDev(body) {
     return json({ ok: false, error: 'stale_config', reasons: ['다른 사용자가 설정을 변경했습니다. 새로고침 후 다시 시도하세요.'] }, 409);
   }
   mockSaveConfig(store, CORE.serializeConfig(body.config || {}));
-  return json({ ok: true, devMode: true });
+  // 프로덕션과 동일 계약: 저장 결과(확정 config + 새 configVersion + 파생값)를 그대로 실어 보낸다.
+  const saved = CORE.parseConfig(store.config);
+  saved.missing = false;
+  CORE.resolvePinned(saved, store.pinned || {});
+  deriveClasslessFromGrades(saved, store.grades || {});
+  return json({
+    ok: true, devMode: true, sheetId: 'MOCK', config: saved, configVersion: hashValues(store.config),
+    warnings: store.warnings || [], pinnedSource: saved.pinnedSource, linkedPinned: store.pinned || {}
+  });
 }
 
 /* =========================================================

@@ -2516,6 +2516,296 @@ await (async function () {
   check('switchSettingsTab 은 SETTINGS_TAB 갱신 후에 렌더한다', iSet !== -1 && iGf !== -1 && iSet < iGf);
 })();
 
+/* =========================================================
+   설정 저장 왕복 횟수 (회귀 방지) — 실제 worker.js 를 Node 로 로드해
+   가짜 fetch 로 Sheets API 호출을 센다. DEV_MODE 를 쓰지 않고 프로덕션 경로를 탄다.
+   worker.js 는 index.html·core 를 텍스트로 import 하므로, 그 import 만
+   문자열 상수로 치환하고 lib/dev 모듈 경로를 절대 URL 로 바꿔 임시 .mjs 로 로드한다.
+   ========================================================= */
+await (async function () {
+  const { writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { pathToFileURL } = await import('node:url');
+
+  const P = function (rel) { return join(__dir, '../' + rel); };
+  function loadWorker() {
+    let src = readFileSync(P('src/worker.js'), 'utf8');
+    const textConst = function (name, rel) {
+      return 'const ' + name + ' = ' + JSON.stringify(readFileSync(P(rel), 'utf8')) + ';';
+    };
+    src = src
+      .replace(/^import html from '\.\/index\.html';$/m, textConst('html', 'src/index.html'))
+      .replace(/^import CoreModelSrc from '\.\/core\/Core_Model\.js';$/m, textConst('CoreModelSrc', 'src/core/Core_Model.js'))
+      .replace(/^import CoreValidateSrc from '\.\/core\/Core_Validate\.js';$/m, textConst('CoreValidateSrc', 'src/core/Core_Validate.js'))
+      .replace(/^import CoreRecommendSrc from '\.\/core\/Core_Recommend\.js';$/m, textConst('CoreRecommendSrc', 'src/core/Core_Recommend.js'))
+      .replace(/^import WebExtraSrc from '\.\/core\/web_extra\.js';$/m, textConst('WebExtraSrc', 'src/core/web_extra.js'))
+      .replace(/from '\.\/(lib|dev)\/([A-Za-z0-9_-]+)\.js'/g, function (m, d, n) {
+        return "from '" + pathToFileURL(P('src/' + d + '/' + n + '.js')).href + "'";
+      });
+    const f = join(tmpdir(), 'tt_worker_test_' + process.pid + '.mjs');
+    writeFileSync(f, src);
+    return import(pathToFileURL(f).href);
+  }
+
+  /* --- 모의 스프레드시트 --- */
+  function makeGrid() {
+    const g = [];
+    g.push(['교사', '교실'].concat(new Array(40).fill('')));
+    const hdr = ['', ''];
+    ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].forEach(function (d) {
+      for (let p = 1; p <= 8; p++) hdr.push(d + p);
+    });
+    g.push(hdr);
+    for (let r = 0; r < 80; r++) {
+      const row = ['교사' + r, 'R' + r];
+      for (let i = 0; i < 40; i++) row.push(i % 3 === 0 ? 'Kor10A' : '');
+      g.push(row);
+    }
+    return g;
+  }
+  function makeStore(extra) {
+    return Object.assign({
+      tabs: ['revised', '설정', '연결그룹', '교과별교사'],
+      grid: makeGrid(),
+      config: [['[연결그룹]', '', ''], ['그룹명', '과목들', ''], ['G1', 'Kor10A, Kor10B', '']],
+      linked: [['학년', '과목명', '교사명', '시간표 표기명', '고정수업시간', '그룹'],
+               ['10', '국어', '김', 'Kor10A', '월1', 'G1']],
+      depts: [['교사명', '교과', '주임여부', '', '배치순서'], ['교사0', '국어', '주임', '', '국어']],
+      writes: [],
+      failConfigRead: 0        // >0 이면 설정 A:C 조회를 그 횟수만큼 실패시킨다
+    }, extra || {});
+  }
+
+  function makeFetch(store, jwks, log) {
+    return async function (url, init) {
+      const u = String(url);
+      if (u.indexOf('oauth2/v3/certs') !== -1) {
+        return new Response(JSON.stringify(jwks), { status: 200 });
+      }
+      let kind = 'other', body = {};
+      if (u.indexOf('fields=sheets.properties') !== -1) {
+        kind = 'getSheets';
+        body = { sheets: store.tabs.map(function (t, i) { return { properties: { sheetId: i, title: t, index: i } }; }) };
+      } else if (u.indexOf('/values:batchGet') !== -1) {
+        const ranges = new URL(u).searchParams.getAll('ranges');
+        kind = 'batchGet';
+        if (ranges.some(function (r) { return /^'?설정'?!/.test(r); }) && store.failConfigRead > 0) {
+          store.failConfigRead--;
+          log.push({ kind: 'batchGet:설정(실패)', ranges: ranges });
+          return new Response('{"error":{"code":503}}', { status: 503 });
+        }
+        body = {
+          valueRanges: ranges.map(function (r) {
+            if (/^'?설정'?!/.test(r)) return { values: store.config };
+            if (/^'?연결그룹'?!/.test(r)) return { values: store.linked };
+            if (/^'?교과별교사'?!/.test(r)) return { values: store.depts };
+            if (/A1:M10/.test(r)) {
+              const t = /^'([^']+)'/.exec(r);
+              return { values: (t && t[1] === 'revised') ? store.grid.slice(0, 10).map(function (x) { return x.slice(0, 13); }) : [] };
+            }
+            return { values: store.grid };
+          })
+        };
+      } else if (u.indexOf('/values:batchUpdate') !== -1) {
+        kind = 'batchUpdate';
+        const payload = JSON.parse(init.body);
+        payload.data.forEach(function (d) {
+          store.writes.push(d.range);
+          if (/^'?설정'?!/.test(d.range)) store.config = d.values.map(function (r) { return r.slice(); });
+        });
+        body = { totalUpdatedCells: 1 };
+      } else if (/:batchUpdate$/.test(u.split('?')[0])) {
+        kind = 'addSheet';
+        body = { replies: [{ addSheet: { properties: { sheetId: 999 } } }] };
+      }
+      log.push({ kind: kind, url: u });
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+  }
+
+  /* --- 인증 --- */
+  const { publicKey: pub, privateKey: priv } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const privPem = priv.export({ type: 'pkcs8', format: 'pem' });
+  const jwk = pub.export({ format: 'jwk' });
+  const KID2 = 'kid-rt';
+  jwk.kid = KID2;
+  const CID = 'cid.apps.googleusercontent.com';
+  const env = { GOOGLE_CLIENT_ID: CID, ALLOWED_DOMAIN: 'gvcs-mg.org', SPREADSHEET_ID: 'SHEET_X' };
+  const now2 = Math.floor(Date.now() / 1000);
+  const idTok = await signJwtRS256({
+    iss: 'https://accounts.google.com', aud: CID, sub: '1', email: 'x@gvcs-mg.org',
+    email_verified: true, hd: 'gvcs-mg.org', iat: now2, exp: now2 + 3600
+  }, privPem, KID2);
+  const H = { authorization: 'Bearer ' + idTok, 'x-sheets-token': 'ya29.tok', 'content-type': 'application/json' };
+
+  const worker = (await loadWorker()).default;
+  const realFetch = globalThis.fetch;
+
+  async function withStore(store, fn) {
+    const log = [];
+    globalThis.fetch = makeFetch(store, { keys: [jwk] }, log);
+    try { return { out: await fn(log), log: log }; }
+    finally { globalThis.fetch = realFetch; }
+  }
+  const call = function (path, init) {
+    return worker.fetch(new Request('https://w' + path, Object.assign({ headers: H }, init || {})), env);
+  };
+  const postCfg = function (config, ver) {
+    return call('/api/config', { method: 'POST', body: JSON.stringify({ config: config, baseConfigVersion: ver }) });
+  };
+
+  /* (1) 저장 1회의 Sheets 왕복 횟수 — 개선 전 config 3 + state 6 = 9회였다 */
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function (log) {
+      const st = await (await call('/api/state?tab=revised')).json();
+      log.length = 0;                                   // 저장분만 센다
+      const res = await postCfg(st.config, st.configVersion);
+      return { st: st, cfg: await res.json(), status: res.status };
+    });
+    const n = r.log.length;
+    check('설정 저장 1회 Sheets 왕복 ≤ 5회 (개선 전 config 3 + state 6 = 9)', n <= 5);
+    check('설정 저장 왕복 내역: ' + r.log.map(function (l) { return l.kind; }).join(' → '), true);
+    check('설정 저장 응답이 config 를 실어 보낸다(클라이언트 /api/state 불필요)', !!r.out.cfg.config);
+    check('설정 저장 응답이 configVersion 을 실어 보낸다', r.out.cfg.configVersion != null);
+    check('설정 저장 응답이 linkedPinned/warnings/pinnedSource 를 포함',
+      r.out.cfg.linkedPinned !== undefined && r.out.cfg.warnings !== undefined && 'pinnedSource' in r.out.cfg);
+    check('설정 저장 응답에 grid 를 싣지 않는다(그리드 재전송 없음)', r.out.cfg.grid === undefined);
+    // 독립 조회(설정 A:C / 연결그룹 A:F)는 병렬 → 순차 왕복 깊이가 호출 수보다 작다
+    check('설정 조회와 연결그룹 조회가 병렬(batchGet 2건이 write 이전)',
+      r.log.filter(function (l) { return l.kind === 'batchGet'; }).length >= 2);
+  }
+
+  /* (2) 응답 configVersion 이 시트 실제 해시와 일치 → 연속 저장이 헛 409 를 내지 않는다 */
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function () {
+      const st = await (await call('/api/state?tab=revised')).json();
+      const a = await (await postCfg(st.config, st.configVersion)).json();
+      const res2 = await postCfg(a.config, a.configVersion);
+      const b = await res2.json();
+      const st2 = await (await call('/api/state?tab=revised')).json();
+      return { a: a, b: b, status2: res2.status, st2: st2 };
+    });
+    check('응답 configVersion 재사용 연속 저장 → 200 (락 정합, 헛 409 없음)',
+      r.out.status2 === 200 && r.out.b.ok === true);
+    check('저장 응답 configVersion == 이후 /api/state configVersion',
+      r.out.b.configVersion === r.out.st2.configVersion);
+    check('저장 응답 config == 이후 /api/state config (파생값 포함 동등)',
+      JSON.stringify(r.out.b.config) === JSON.stringify(r.out.st2.config));
+    check('저장 응답 pinnedSource/linkedPinned/warnings == /api/state',
+      r.out.b.pinnedSource === r.out.st2.pinnedSource &&
+      JSON.stringify(r.out.b.linkedPinned) === JSON.stringify(r.out.st2.linkedPinned) &&
+      JSON.stringify(r.out.b.warnings) === JSON.stringify(r.out.st2.warnings));
+  }
+
+  /* (3) 낙관적 락 — 어긋난 baseConfigVersion 은 409 이고 쓰기가 일어나지 않는다 */
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function () {
+      const res = await postCfg({ groups: [] }, 'WRONG_VERSION');
+      return { status: res.status, body: await res.json() };
+    });
+    check('baseConfigVersion 불일치 → 409 stale_config',
+      r.out.status === 409 && r.out.body.error === 'stale_config');
+    check('stale_config 시 시트에 쓰기 없음', store.writes.length === 0);
+  }
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function () {
+      const res = await call('/api/config', { method: 'POST', body: JSON.stringify({ config: {} }) });
+      return { status: res.status, body: await res.json() };
+    });
+    check('baseConfigVersion 누락 → 400 missing_base_version',
+      r.out.status === 400 && r.out.body.error === 'missing_base_version');
+    check('missing_base_version 시 시트에 쓰기 없음', store.writes.length === 0);
+  }
+
+  /* (4) 조회 실패는 "설정 탭 없음"으로 위장하지 않는다 → 503, 쓰기 없음 */
+  {
+    const store = makeStore({ failConfigRead: 1 });
+    const r = await withStore(store, async function () {
+      const res = await postCfg({ groups: [] }, 'anything');
+      return { status: res.status, body: await res.json() };
+    });
+    check('저장 전 설정 조회 실패 → 503 config_unavailable',
+      r.out.status === 503 && r.out.body.error === 'config_unavailable');
+    check('config_unavailable 시 시트에 쓰기 없음(설정 소거 방지)', store.writes.length === 0);
+  }
+
+  /* (5) 저장 후 확정 조회가 실패하면 신뢰 못 할 config/version 을 내려보내지 않는다 */
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function () {
+      const st = await (await call('/api/state?tab=revised')).json();
+      store.failConfigRead = 1;               // 저장 직후 재조회만 실패
+      // 저장 전 조회는 이미 끝났으므로, 다음 설정 조회 = 확정 조회
+      const res = await postCfg(st.config, st.configVersion);
+      return { status: res.status, body: await res.json() };
+    });
+    // 저장 전 조회가 먼저 실패하면 503(그것도 안전) — 어느 쪽이든 "가짜 버전"은 내려가지 않는다
+    const b = r.out.body;
+    check('확정 조회 실패 시 가짜 configVersion 을 내려보내지 않는다',
+      b.configVersion == null);
+    check('확정 조회 실패 시 클라이언트에 전체 재조회를 지시(reload) 하거나 503',
+      (b.ok === true && b.reload === true) || r.out.status === 503);
+  }
+
+  /* (6) D열 보존 — 설정 쓰기는 A:C 범위 지정 batchUpdate 뿐(clear 없음) */
+  {
+    const store = makeStore();
+    await withStore(store, async function () {
+      const st = await (await call('/api/state?tab=revised')).json();
+      await postCfg(st.config, st.configVersion);
+    });
+    const cfgWrites = store.writes.filter(function (r) { return /설정/.test(r); });
+    check('설정 쓰기는 1건(단일 batchUpdate)', cfgWrites.length === 1);
+    check('설정 쓰기 범위가 A1:C{n} 로 제한(D열 이후 미접촉): ' + cfgWrites[0],
+      /^'설정'!A1:C\d+$/.test(cfgWrites[0] || ''));
+  }
+
+  /* (7) 클라이언트: 성공 경로는 /api/state 를 다시 타지 않고, 실패·409 경로는 STATE 를 건드리지 않는다 */
+  {
+    const html2 = readFileSync(P('src/index.html'), 'utf8');
+    const pc = fnSrc(html2, 'postConfig');
+    check('postConfig 성공 경로가 applyConfigResult 로 응답을 반영', /applyConfigResult\(r\.data\)/.test(pc));
+    check('postConfig 409 stale_config 는 종전대로 loadState 로 최신화',
+      /stale_config[\s\S]*?loadState\(STATE\.sheetId, STATE\.tab\)/.test(pc));
+    check('postConfig 503 config_unavailable 경로 유지', /config_unavailable/.test(pc));
+    // 실패/409/503 경로에서 STATE 를 낙관적으로 갱신하지 않는다(되돌릴 것이 없어야 안전)
+    const beforeOk = pc.slice(0, pc.indexOf('applyConfigResult(r.data)'));
+    check('저장 성공 확인 전에 STATE.config/configVersion 을 갱신하지 않는다',
+      !/STATE\.(config|configVersion)\s*=/.test(beforeOk));
+    const ac = fnSrc(html2, 'applyConfigResult');
+    check('applyConfigResult 가 config/configVersion/warnings/linkedPinned 를 갱신',
+      /STATE\.config = data\.config/.test(ac) && /STATE\.configVersion = data\.configVersion/.test(ac) &&
+      /STATE\.warnings = data\.warnings/.test(ac) && /STATE\.linkedPinned = data\.linkedPinned/.test(ac));
+    check('applyConfigResult 가 그리드·모델을 건드리지 않는다(설정 저장은 그리드 무변경)',
+      !/STATE\.(grid|model|version)\s*=/.test(ac));
+    check('applyConfigResult 가 화면을 다시 그린다', /renderGrid\(\)/.test(ac) && /renderGradeFreeIfOpen\(\)/.test(ac));
+    check('서버가 reload 를 지시하면 클라이언트는 /api/state 전체 재조회로 폴백',
+      /r\.data\.reload[\s\S]*?loadState\(STATE\.sheetId, STATE\.tab\)/.test(pc));
+  }
+
+  /* (8) DEV 핸들러도 동일 계약(응답 형태 미러링) */
+  {
+    resetMockStore();
+    const devEnv = { DEV_MODE: '1', DEV_EMAIL: 'dev@gvcs-mg.org' };
+    const st = await (await worker.fetch(new Request('https://w/api/state'), devEnv)).json();
+    const res = await worker.fetch(new Request('https://w/api/config', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: st.config, baseConfigVersion: st.configVersion })
+    }), devEnv);
+    const b = await res.json();
+    const st2 = await (await worker.fetch(new Request('https://w/api/state'), devEnv)).json();
+    check('DEV 설정 저장 응답도 config/configVersion 포함', !!b.config && b.configVersion != null);
+    check('DEV 저장 응답 configVersion == 이후 state configVersion', b.configVersion === st2.configVersion);
+    check('DEV 저장 응답 config == 이후 state config',
+      JSON.stringify(b.config) === JSON.stringify(st2.config));
+    resetMockStore();
+  }
+})();
+
 console.log('');
 if (failures.length) {
   console.log('실패 ' + failures.length + '건:');

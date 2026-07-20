@@ -1634,6 +1634,29 @@ function cloneConfig(c) {
   return out;
 }
 
+/* 설정 저장 응답을 화면 상태에 반영한다(그리드·model 은 설정 저장으로 바뀌지 않으므로 그대로 둔다).
+   onState 의 설정 관련 부분과 동일한 필드만 갱신한다 — 시트와 어긋나지 않도록 서버 확정값만 쓴다. */
+function applyConfigResult(data) {
+  STATE.config = data.config;
+  STATE.configVersion = data.configVersion;
+  STATE.warnings = data.warnings || [];
+  STATE.linkedPinned = data.linkedPinned || {};
+  show('loading', false);
+  renderGrid();
+  updateToolbarNote();
+  renderGradeFreeIfOpen();
+}
+
+/* 저장 성공 후 공통 마무리: 설정 팝업이 열려 있으면 DRAFT 를 최신 config 로 다시 만들고 토스트. */
+function afterConfigSaved(keepOpen) {
+  var open = document.getElementById('settings').classList.contains('open');
+  if (keepOpen && open) {
+    buildDraftFromConfig();
+    renderSettings();
+  }
+  toast('설정을 저장했습니다');
+}
+
 function postConfig(config, keepOpen) {
   show('loading', true, 'flex');
   return apiCall('/api/config', {
@@ -1652,14 +1675,14 @@ function postConfig(config, keepOpen) {
       return loadState(STATE.sheetId, STATE.tab).then(function () { if (keepOpen) { SETTINGS_DIRTY = true; } });
     }
     if (!r.data || !r.data.ok) { show('loading', false); alert('설정 저장 실패: ' + ((r.data && r.data.error) || r.status)); return; }
-    return loadState(STATE.sheetId, STATE.tab).then(function () {
-      var open = document.getElementById('settings').classList.contains('open');
-      if (keepOpen && open) {
-        buildDraftFromConfig();
-        renderSettings();
-      }
-      toast('설정을 저장했습니다');
-    });
+    // 설정 저장은 시간표 그리드를 건드리지 않는다 → /api/state 전체 재조회(그리드 83×42 재다운로드) 불필요.
+    // 서버가 확정한 config/configVersion/파생값을 그대로 반영한다.
+    // 단 서버가 확정 조회에 실패해 reload:true 를 보내면(신뢰 불가) 종전대로 전체를 다시 받는다.
+    if (r.data.reload || r.data.configVersion == null) {
+      return loadState(STATE.sheetId, STATE.tab).then(function () { afterConfigSaved(keepOpen); });
+    }
+    applyConfigResult(r.data);
+    afterConfigSaved(keepOpen);
   }).catch(function (err) {
     show('loading', false);
     if (err && (err.auth || err.sheetsAccess)) { handleErr(err); return; }
