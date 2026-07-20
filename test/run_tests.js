@@ -1,0 +1,2093 @@
+/**
+ * 통합 단위 테스트 (Node ESM). 실행: node test/run_tests.js
+ * 커버: parseConfig / apply 재검증(checkMoves) / sheets 배치 변환 / hashGrid / 인증.
+ */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { generateKeyPairSync } from 'node:crypto';
+import { slotColLetter, cellsToBatchData, hashGrid, hashValues, lastDataRow, parseLinkedGroups, deriveClasslessFromGrades, detectLayout, normalizeGrid, colLetter, makeSheetsFetch, resolveSheetId, sheetsErrorStatus, mapSheetsError, overwriteSheetRange, padRows } from '../src/lib/sheets.js';
+import { signJwtRS256, verifyIdToken } from '../src/lib/google-auth.js';
+import { readConfigSafe, readConfigWithVersion, resolveApplyTab, nonTeacherRows, incompleteUnits, historyKindLabel, deptBoundaries, parseDepts, gradeSlotState, toggleGradeSlot, gradeFreeState, assignCandidates, raOpError, isRaValue, RA_VALUE_RE, raFreeCellLabel } from '../src/lib/state.js';
+import { getMockStore, resetMockStore, mockPickTab, applyCellsToGrid, mockDuplicateTab, mockSaveConfig, mockListTabs } from '../src/dev/mock_store.js';
+
+// 코어(CJS 가드형)를 worker/브라우저와 동일하게 텍스트 연결 → new Function 로드.
+// (package.json "type":"module" 이라 .js 를 require 하면 ESM 로 해석돼 CJS 가드가 깨짐)
+const __dir = dirname(fileURLToPath(import.meta.url));
+const readCore = function (rel) { return readFileSync(join(__dir, rel), 'utf8'); };
+const CORE = new Function(
+  readCore('../src/core/Core_Model.js') + '\n' +
+  readCore('../src/core/Core_Validate.js') + '\n' +
+  readCore('../src/core/Core_Recommend.js') + '\n' +
+  readCore('../src/core/web_extra.js') + '\n' +
+  'return { buildModel, checkMoves, checkMovesDelta, hasBlock, parseConfig, planMoveTo, planMovesTo, planScanTo, planScanAll, planSwapTo, slotLabel, movesToCellWrites, serializeConfig, expandUnit, findConflicts, resolvePinned };'
+)();
+const parseConfig = CORE.parseConfig;
+const CM = { buildModel: CORE.buildModel };
+const CV = { checkMoves: CORE.checkMoves, checkMovesDelta: CORE.checkMovesDelta, hasBlock: CORE.hasBlock };
+
+const failures = [];
+function check(desc, cond) {
+  console.log((cond ? 'PASS' : 'FAIL') + '  ' + desc);
+  if (!cond) failures.push(desc);
+}
+function eq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+async function expectFail(desc, promise, code, status) {
+  try {
+    await promise;
+    check(desc + ' (거부되어야 함)', false);
+  } catch (e) {
+    check(desc + ' → ' + e.message + (e.status ? '/' + e.status : ''),
+      e.message === code && (status === undefined || e.status === status));
+  }
+}
+
+/* =========================================================
+   1. parseConfig
+   ========================================================= */
+{
+  const values = [
+    ['[고정블록]'], ['슬롯', '라벨', '적용학년'], ['월3', 'Counseling', '전체'], ['화7', 'S.A', '7,8,9'], [''],
+    ['[무반과목]'], ['과목명', '대상학급', '비고'], ['Cal12', '12전체', ''], ['JMA', '', ''], [''],
+    ['[팀티칭]'], ['과목명', '교사들'], ['Cal12', '교사04, 교사07']
+  ];
+  const cfg = parseConfig(values);
+  check('parseConfig fixedBlocks 2개', cfg.fixedBlocks.length === 2);
+  const wol3 = cfg.fixedBlocks.find(function (b) { return b.day === 0 && b.period === 3; });
+  check('월3 grades === "all"', wol3 && wol3.grades === 'all');
+  const hwa7 = cfg.fixedBlocks.find(function (b) { return b.day === 1 && b.period === 7; });
+  check('화7 grades === [7,8,9]', hwa7 && eq(hwa7.grades, [7, 8, 9]));
+  check('classless.Cal12 === ["12전체"]', eq(cfg.classless['Cal12'], ['12전체']));
+  check('classless.JMA 키 없음(미분류)', !Object.prototype.hasOwnProperty.call(cfg.classless, 'JMA'));
+  check('classlessUnset 에 JMA 포함', (cfg.classlessUnset || []).indexOf('JMA') !== -1);
+  check('teamTeaching.Cal12 === ["교사04","교사07"]', eq(cfg.teamTeaching['Cal12'], ['교사04', '교사07']));
+}
+
+/* =========================================================
+   1b. 무반 미지정(미분류) vs 대상없음 확정 분리
+   ========================================================= */
+{
+  const serializeConfig = CORE.serializeConfig;
+  // (a) 빈 대상 행 → 키 없음(미분류) + classlessUnset 수집
+  const a = parseConfig([['[무반과목]'],['과목명','대상학급','비고'],['ApCalAB','','']]);
+  check('빈행→classless 키 없음', !Object.prototype.hasOwnProperty.call(a.classless,'ApCalAB'));
+  check('빈행→classlessUnset 포함', a.classlessUnset.indexOf('ApCalAB')!==-1);
+  // (b) '없음' 토큰 → [] (대상 없음 확정)
+  const b = parseConfig([['[무반과목]'],['과목명','대상학급','비고'],['ApCalBC','없음','']]);
+  check("'없음'→[]", eq(b.classless['ApCalBC'], []));
+  const b2 = parseConfig([['[무반과목]'],['과목명','대상학급','비고'],['ApCalBC','대상 없음','']]);
+  check("'대상 없음'(공백)→[]", eq(b2.classless['ApCalBC'], []));
+  // (c) 라운드트립 []→'없음'→[]
+  const rows = serializeConfig({ classless: { Econ: [] }, classlessUnset: [] });
+  const back = parseConfig(rows);
+  check('라운드트립 []→없음→[]', eq(back.classless['Econ'], []));
+  // (d) 하위호환: 기존 빈행 데이터는 이제 미분류(키 없음)로 파싱
+  const c = parseConfig([['[무반과목]'],['과목명','대상학급','비고'],['Legacy','','메모']]);
+  check('하위호환 빈행→미분류', !Object.prototype.hasOwnProperty.call(c.classless,'Legacy') && c.classlessUnset.indexOf('Legacy')!==-1);
+}
+
+/* =========================================================
+   1c. [정규교시] 블록 파싱/직렬화 왕복 + gradeFreeState 판정
+   ========================================================= */
+{
+  const serializeConfig = CORE.serializeConfig;
+  const values = [
+    ['[정규교시]'], ['학년', '요일', '교시'],
+    ['8', '금', '7'], ['7', '화', '7'],
+    ['8', '금', '9'],            // period 9 = 파싱 실패 → rawExtras 보존
+  ];
+  const cfg = parseConfig(values);
+  check('regularSlots 2건 파싱', cfg.regularSlots.length === 2);
+  check('8학년 금7 등록', cfg.regularSlots.some(function (s) { return s.grade === 8 && s.day === 4 && s.period === 7; }));
+  check('7학년 화7 등록', cfg.regularSlots.some(function (s) { return s.grade === 7 && s.day === 1 && s.period === 7; }));
+  check('정규교시 파싱실패행 rawExtras 보존', !!cfg.rawExtras['[정규교시]'] && cfg.rawExtras['[정규교시]'].length === 1);
+  // 왕복: serialize → re-parse 동일
+  const back = parseConfig(serializeConfig(cfg));
+  check('정규교시 왕복 regularSlots 동일', eq(back.regularSlots, cfg.regularSlots));
+  check('정규교시 왕복 rawExtras 보존', eq(back.rawExtras['[정규교시]'], cfg.rawExtras['[정규교시]']));
+  // gradeFreeState: 등록 슬롯은 일반 판정, 미등록은 after
+  const model0 = { entries: [] };
+  const gf8 = gradeFreeState(model0, cfg, 8, { day: 4, period: 7 });
+  check('8학년 금7(등록) → after 아님', gf8.kind !== 'after');
+  check('8학년 금7(등록) → 일반판정(all/some/partial/none/busy 등)', gf8.kind === 'all');
+  const gf7 = gradeFreeState(model0, cfg, 7, { day: 4, period: 7 });
+  check('7학년 금7(미등록) → after', gf7.kind === 'after');
+  // busy 판정도 정상 동작: 8학년 금7 슬롯(idx 4*8+6=38)에 Kor8A 배정 → 8A busy
+  const modelBusy = { entries: [{ slots: (function () { var a = []; a[38] = 'Kor8A'; return a; })() }] };
+  const gfb = gradeFreeState(modelBusy, cfg, 8, { day: 4, period: 7 });
+  check('8학년 금7 등록 + Kor8A 배정 → 8A busy', gfb.busyClasses.indexOf('8A') !== -1);
+}
+
+/* =========================================================
+   2. apply 재검증 (checkMoves)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  // teacherX(행3): Kor7A @idx1, teacherY(행4): Kor7A @idx0
+  const dataRows = [
+    dataRow('김X', { 1: 'Kor7A' }),
+    dataRow('이Y', { 0: 'Kor7A' })
+  ];
+  const model = CM.buildModel(dataRows, 3);
+  const config = {
+    fixedBlocks: [],
+    classless: { Cal12: ['12A', '12B', '12C'], JMA: ['12A', '12B', '12C'] },
+    teamTeaching: {}
+  };
+
+  // (a) 유효 이동: teacherX의 Kor7A(idx1) → 빈 슬롯(idx5)
+  const okMoves = [{ name: '김X', row: 3, fromIdx: 1, toIdx: 5 }];
+  const okConf = CV.checkMoves(model, config, okMoves);
+  check('유효 이동은 block 없음', CV.hasBlock(okConf) === false);
+
+  // (b) 학급 중복: teacherY의 Kor7A(idx0) → idx1 (teacherX Kor7A와 같은 슬롯·학급 7A)
+  const badMoves = [{ name: '이Y', row: 4, fromIdx: 0, toIdx: 1 }];
+  const badConf = CV.checkMoves(model, config, badMoves);
+  const reasons = badConf.filter(function (c) { return c.severity === 'block'; }).map(function (c) { return c.message; });
+  check('학급 충돌 이동은 block 발생', CV.hasBlock(badConf) === true && reasons.length > 0);
+
+  // (c) 델타: 기존 충돌 슬롯을 지나는 무관 이동은 통과(block 없음) + preexisting 보고
+  // 교사P/교사Q가 idx1에 Kor7A(기존 7A@월2 충돌), 교사R은 idx5 Kor8A → idx1로 이동(무관 과목)
+  const preRows = [
+    dataRow('P', { 1: 'Kor7A' }),
+    dataRow('Q', { 1: 'Kor7A' }),
+    dataRow('R', { 5: 'Kor8A' })
+  ];
+  const preModel = CM.buildModel(preRows, 3);
+  const preDelta = CV.checkMovesDelta(preModel, config, [{ name: 'R', row: 5, fromIdx: 5, toIdx: 1 }]);
+  check('기존충돌 슬롯 통과 이동은 block 없음', preDelta.blocks.length === 0);
+  check('기존충돌은 preexisting 경고로 보고', preDelta.preexisting.some(function (c) { return c.preexisting === true && c.slot === 1; }));
+}
+
+/* =========================================================
+   3. sheets 배치 변환
+   ========================================================= */
+{
+  check('slotColLetter(0)==="C"', slotColLetter(0) === 'C');
+  check('slotColLetter(7)==="J"', slotColLetter(7) === 'J');
+  check('slotColLetter(23)==="Z"', slotColLetter(23) === 'Z');
+  check('slotColLetter(24)==="AA"', slotColLetter(24) === 'AA');
+  check('slotColLetter(39)==="AP"', slotColLetter(39) === 'AP');
+
+  const cells = [{ row: 3, idx: 0, value: '' }, { row: 45, idx: 39, value: 'X' }];
+  const data = cellsToBatchData('시간표(작업)', cells);
+  check("cellsToBatchData[0].range === 'C3'",
+    data[0].range === "'시간표(작업)'!C3" && eq(data[0].values, [['']]));
+  check("cellsToBatchData[1].range === 'AP45'",
+    data[1].range === "'시간표(작업)'!AP45" && eq(data[1].values, [['X']]));
+}
+
+/* =========================================================
+   3b. 레이아웃 탐지 / 정규화 / 역매핑 (가변 slotStartCol 버그 수정)
+   ========================================================= */
+{
+  function headerRowAt(slotStartCol) {
+    // 1-based slotStartCol 위치(index slotStartCol-1)에 'Mon1'을 둔 헤더행(index1)
+    var row = [];
+    for (var i = 0; i < 12; i++) row.push('');
+    row[slotStartCol - 1] = 'Mon1';
+    return row;
+  }
+  function gridWithHeader(slotStartCol) {
+    return [
+      ['제목행'],                 // index0
+      headerRowAt(slotStartCol),  // index1 = 1-based 2행
+      ['교사01']                  // index2 데이터
+    ];
+  }
+  // detectLayout: B/C/D 시작 3케이스
+  var lB = detectLayout(gridWithHeader(2));
+  check('detectLayout B-start → slotStartCol 2', lB && lB.slotStartCol === 2 && lB.headerRow === 2);
+  var lC = detectLayout(gridWithHeader(3));
+  check('detectLayout C-start → slotStartCol 3', lC && lC.slotStartCol === 3 && lC.headerRow === 2);
+  var lD = detectLayout(gridWithHeader(4));
+  check('detectLayout D-start → slotStartCol 4', lD && lD.slotStartCol === 4 && lD.headerRow === 2);
+  // Mon1 없음 → null
+  check('detectLayout Mon1 없음 → null', detectLayout([['a', 'b'], ['c', 'd']]) === null);
+
+  // normalizeGrid: D-start 원시행 [teacher, classroom, 'EMPTY', 'S0','S1',...]
+  var rawD = ['T', 'C', 'EMPTY'];
+  for (var k = 0; k < 40; k++) rawD.push('S' + k);
+  var outD = normalizeGrid([rawD], { headerRow: 2, slotStartCol: 4 })[0];
+  check('normalizeGrid D-start out[0]=teacher', outD[0] === 'T');
+  check('normalizeGrid D-start out[1]=classroom', outD[1] === 'C');
+  check('normalizeGrid D-start out[2]=S0', outD[2] === 'S0');
+  check('normalizeGrid D-start out[3]=S1', outD[3] === 'S1');
+
+  // normalizeGrid: B-start 원시행 [teacher, 'S0','S1',...] → classroom '' , out[2]=S0
+  var rawB = ['T'];
+  for (var k2 = 0; k2 < 40; k2++) rawB.push('S' + k2);
+  var outB = normalizeGrid([rawB], { headerRow: 2, slotStartCol: 2 })[0];
+  check('normalizeGrid B-start out[1]="" (교실열 없음)', outB[1] === '');
+  check('normalizeGrid B-start out[2]=S0', outB[2] === 'S0');
+
+  // 역매핑: cellsToBatchData slotStartCol 반영
+  check("cellsToBatchData slotStartCol=2 → 'T'!B3",
+    cellsToBatchData('T', [{ row: 3, idx: 0, value: 'x' }], 2)[0].range === "'T'!B3");
+  check("cellsToBatchData slotStartCol=4 → 'T'!D3",
+    cellsToBatchData('T', [{ row: 3, idx: 0, value: 'x' }], 4)[0].range === "'T'!D3");
+  check("cellsToBatchData 기본(인자없음) → 'T'!C3",
+    cellsToBatchData('T', [{ row: 3, idx: 0, value: 'x' }])[0].range === "'T'!C3");
+}
+
+/* =========================================================
+   4. hashGrid 결정성
+   ========================================================= */
+{
+  function mkGrid() {
+    const g = [];
+    for (let r = 0; r < 5; r++) {
+      const row = [];
+      for (let c = 0; c < 42; c++) row.push('r' + r + 'c' + c);
+      g.push(row);
+    }
+    return g;
+  }
+  // dataStart=3(index2), dataEnd=5(index4): 슬롯 셀(index2..41) 행 index2..4만 해시.
+  const g0 = mkGrid();
+  const h1 = hashGrid(g0, 3, 5);
+
+  const g1 = mkGrid();
+  g1[2][2] = 'CHANGED'; // 슬롯 셀
+  const h2 = hashGrid(g1, 3, 5);
+
+  const g2 = mkGrid();
+  g2[2][0] = 'CHANGED'; // A열(이름)
+  const h3 = hashGrid(g2, 3, 5);
+
+  check('hashGrid 슬롯 셀 변경 → 해시 다름', h1 !== h2);
+  check('hashGrid A열 변경 → 해시 동일', h1 === h3);
+}
+
+/* =========================================================
+   4b. 동적 dataStart/dataEnd (헤더행 비-최상단 + 후행 빈 행)
+   ========================================================= */
+{
+  // 0행: 주석, 1행: 헤더(Mon1), 2~3행: 교사 데이터, 4~6행: 후행 전부 빈 행.
+  function slotRow(name, subj0) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(i === 0 ? subj0 : '');
+    return r;
+  }
+  const header = ['', ''];
+  for (let i = 0; i < 40; i++) header.push('Mon' + (i + 1));
+  header[2] = 'Mon1';
+  const emptyRow = new Array(42).fill('');
+  const grid = [
+    ['제목행', '', '', '', '', ''],   // 0
+    header,                            // 1 (헤더, 1-based 2)
+    slotRow('김A', 'Kor7A'),          // 2 (1-based 3)
+    slotRow('이B', 'Kor7B'),          // 3 (1-based 4)
+    emptyRow.slice(),                 // 4 후행 빈
+    emptyRow.slice(),                 // 5 후행 빈
+    emptyRow.slice()                  // 6 후행 빈
+  ];
+  const dataStart = 3, dataEnd = lastDataRow(grid);
+  check('lastDataRow 후행 빈 행 무시 → 4', dataEnd === 4);
+
+  // 후행 빈 행을 더 붙여도 (dataStart,dataEnd) 해시는 동일.
+  const grid2 = grid.map((r) => r.slice());
+  grid2.push(emptyRow.slice()); grid2.push(emptyRow.slice());
+  check('lastDataRow 여전히 4(빈 행 추가 무시)', lastDataRow(grid2) === 4);
+  check('hashGrid 후행 빈 행 무시 → 안정적',
+    hashGrid(grid, dataStart, dataEnd) === hashGrid(grid2, dataStart, lastDataRow(grid2)));
+
+  const model = CORE.buildModel(grid.slice(dataStart - 1), dataStart);
+  check('buildModel 동적 dataStart → entries 2개', model.entries.length === 2);
+  check('buildModel 행번호 3,4', eq(model.entries.map((e) => e.row).sort(), [3, 4]));
+}
+
+/* =========================================================
+   5. 인증 (RSA 자체 발급 ID 토큰)
+   ========================================================= */
+{
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const publicJwk = publicKey.export({ format: 'jwk' });
+
+  const CLIENT_ID = 'test-client-id.apps.googleusercontent.com';
+  const DOMAIN = 'gvcs-mg.org';
+  const KID = 'test-kid-1';
+  const now = Math.floor(Date.now() / 1000);
+  const getJwk = async function (kid) { return kid === KID ? publicJwk : null; };
+  const opts = { clientId: CLIENT_ID, allowedDomain: DOMAIN, getJwk: getJwk };
+
+  function makeIdToken(overrides, kid) {
+    const payload = Object.assign({
+      iss: 'https://accounts.google.com',
+      aud: CLIENT_ID,
+      sub: '1234567890',
+      email: 'x@gvcs-mg.org',
+      email_verified: true,
+      hd: DOMAIN,
+      iat: now,
+      exp: now + 3600
+    }, overrides || {});
+    return signJwtRS256(payload, privatePem, kid === undefined ? KID : kid);
+  }
+
+  // 이 블록은 즉시 실행 async IIFE로 감싸 최상위 await 회피
+  await (async function () {
+    const p = await verifyIdToken(await makeIdToken(), opts);
+    check('정상 토큰 통과 (email 반환)', p.email === 'x@gvcs-mg.org');
+
+    await expectFail('gmail.com 도메인 거부',
+      verifyIdToken(await makeIdToken({ hd: 'gmail.com', email: 'x@gmail.com' }), opts),
+      'domain_not_allowed', 403);
+    await expectFail('hd 없는 gmail 거부',
+      verifyIdToken(await makeIdToken({ hd: undefined, email: 'x@gmail.com' }), opts),
+      'domain_not_allowed', 403);
+  })();
+}
+
+/* =========================================================
+   6. state 헬퍼 — 설정 부재 폴백 / 교사행 이동 가드 / 유형 라벨
+   ========================================================= */
+await (async function () {
+  // (1) 설정 탭 부재 → batchGet throw → missing:true 로 state 성공
+  const throwingGet = async function () { throw new Error('sheets_api_error 400 no config tab'); };
+  const cfgMissing = await readConfigSafe(throwingGet, "'설정'!A:C", parseConfig);
+  check('설정 부재 시 config.missing === true', cfgMissing.missing === true);
+  check('설정 부재 시 fixedBlocks 빈 배열', eq(cfgMissing.fixedBlocks, []));
+  check('설정 부재 시 classless 빈 객체', eq(cfgMissing.classless, {}));
+
+  // (2) 설정 존재 → missing:false
+  const okGet = async function () { return [[['[고정블록]'], ['슬롯', '라벨', '적용학년'], ['월3', 'Counseling', '전체']]]; };
+  const cfgOk = await readConfigSafe(okGet, "'설정'!A:C", parseConfig);
+  check('설정 존재 시 config.missing === false', cfgOk.missing === false);
+  check('설정 존재 시 fixedBlocks 파싱됨', cfgOk.fixedBlocks.length === 1);
+
+  // (3) RA 행 move → nonTeacherRows 비어있지 않음 (apply에서 400 거부 경로)
+  const model = { entries: [
+    { row: 3, type: 'teacher' },
+    { row: 4, type: 'ra' }
+  ] };
+  check('교사행만 이동 → nonTeacherRows 빈 배열',
+    eq(nonTeacherRows(model, [{ row: 3, fromIdx: 0, toIdx: 1 }]), []));
+  check('RA행 포함 이동 → nonTeacherRows 해당 row 반환',
+    eq(nonTeacherRows(model, [{ row: 4, fromIdx: 0, toIdx: 1 }]), [4]));
+
+  // (4) 유형 라벨 매핑
+  check("historyKindLabel('undo') === '되돌리기'", historyKindLabel('undo', [{ fromIdx: 5, toIdx: 2 }]) === '되돌리기');
+  check("historyKindLabel('undo') 팀형태여도 '되돌리기'",
+    historyKindLabel('undo', [{ fromIdx: 2, toIdx: 5 }, { fromIdx: 2, toIdx: 5 }]) === '되돌리기');
+  check("historyKindLabel('chain') === '연쇄'", historyKindLabel('chain', [{ fromIdx: 0, toIdx: 1 }]) === '연쇄');
+  check("historyKindLabel(undefined,1건) === '이동'", historyKindLabel(undefined, [{ fromIdx: 0, toIdx: 1 }]) === '이동');
+  check("direct 팀이동(같은 슬롯 2건) === '이동(팀)'",
+    historyKindLabel('direct', [{ fromIdx: 2, toIdx: 5 }, { fromIdx: 2, toIdx: 5 }]) === '이동(팀)');
+  check("direct 서로 다른 슬롯 2건 === '이동'",
+    historyKindLabel('direct', [{ fromIdx: 2, toIdx: 5 }, { fromIdx: 3, toIdx: 6 }]) === '이동');
+})();
+
+/* =========================================================
+   DEV MODE 모의 스토어 (인메모리 스냅샷)
+   ========================================================= */
+{
+  // (1) 스냅샷 차원
+  resetMockStore();
+  const store = getMockStore();
+  check('mock grid 83행', store.sheets.revised.length === 83);
+  check('mock grid 모든 행 42열', store.sheets.revised.every((r) => r.length === 42));
+
+  // (2) 설정 파싱
+  const cfg = parseConfig(store.config);
+  check('mock fixedBlocks 9개', cfg.fixedBlocks.length === 9);
+  const b월3 = cfg.fixedBlocks.find((b) => b.day === 0 && b.period === 3);
+  check("mock 월3 고정블록 grades === 'all'", !!b월3 && b월3.grades === 'all');
+  const b화7 = cfg.fixedBlocks.find((b) => b.day === 1 && b.period === 7);
+  check('mock 화7 고정블록 grades === [7,8,9]', !!b화7 && eq(b화7.grades, [7, 8, 9]));
+  check('mock teamTeaching 비어있지 않음', Object.keys(cfg.teamTeaching).length > 0);
+  check('mock classless 비어있지 않음', Object.keys(cfg.classless).length > 0);
+
+  // (3) 실제 mock 그리드에 기계적 apply
+  const model = CORE.buildModel(store.sheets.revised.slice(2), 3);
+  let entry = null, fromIdx = -1, toIdx = -1;
+  for (let i = 0; i < model.entries.length; i++) {
+    const e = model.entries[i];
+    if (e.type !== 'teacher') continue;
+    const f = e.slots.findIndex((s) => s);
+    const t = e.slots.findIndex((s) => !s);
+    if (f >= 0 && t >= 0) { entry = e; fromIdx = f; toIdx = t; break; }
+  }
+  check('교사 이동 대상(채워진 슬롯+빈 슬롯) 존재', !!entry);
+  if (entry) {
+    const subject = entry.slots[fromIdx];
+    const move = [{ name: entry.name, row: entry.row, fromIdx, toIdx }];
+    const cells = CORE.movesToCellWrites(model, move);
+    const dEnd = lastDataRow(store.sheets.revised);
+    const h0 = hashGrid(store.sheets.revised, 3, dEnd);
+    applyCellsToGrid(store.sheets.revised, cells);
+    check('apply 후 목적 슬롯에 과목 기록', store.sheets.revised[entry.row - 1][2 + toIdx] === subject);
+    check("apply 후 원래 슬롯 비워짐", store.sheets.revised[entry.row - 1][2 + fromIdx] === '');
+    check('apply 후 hashGrid 변경됨', hashGrid(store.sheets.revised, 3, dEnd) !== h0);
+  }
+
+  // (4) 탭 복제 딥카피 독립성
+  resetMockStore();
+  const s2 = getMockStore();
+  const dupName = mockDuplicateTab(s2, 'revised');
+  check("사본 이름 'revised (사본1)'", dupName === 'revised (사본1)');
+  check('사본 탭 생성됨', !!s2.sheets[dupName]);
+  check('사본 == revised 스냅샷',
+    JSON.stringify(s2.sheets[dupName]) === JSON.stringify(s2.sheets.revised));
+  s2.sheets[dupName][2][2] = '__X__';
+  check('사본 수정이 revised 에 전이되지 않음(딥카피)', s2.sheets.revised[2][2] !== '__X__');
+}
+
+/* =========================================================
+   7. serializeConfig 왕복 일치 (parseConfig ∘ serializeConfig === identity)
+   ========================================================= */
+{
+  const serializeConfig = CORE.serializeConfig;
+  const cfg = {
+    fixedBlocks: [
+      { day: 0, period: 3, label: 'Counseling', grades: 'all', classes: [], partialGrades: [] },
+      { day: 1, period: 7, label: 'S.A', grades: [7, 8, 9], classes: [], partialGrades: [] },
+      { day: 2, period: 1, label: '반블록', grades: [], classes: ['7A'], partialGrades: [] }
+    ],
+    classless: { Cal12: ['12A', '12B', '12C'], JMA: [] },
+    teamTeaching: { Cal12: ['교사04', '교사07'] },
+    linkedGroups: { '제2외': ['Honors Japanese', 'Honors German'] },
+    unavailable: [
+      { name: '교사01', slots: [0, 10] },
+      { name: '교사09', slots: [20], row: 35 }
+    ]
+  };
+  const round = parseConfig(serializeConfig(cfg));
+  delete round.missing; delete round.classlessNotes; delete round.rawExtras; delete round.pinnedManual; delete round.classlessUnset; delete round.regularSlots;
+  check('serializeConfig 왕복 일치(parseConfig 역함수)', eq(round, cfg));
+
+  // 교사불가 파싱: 행 유무 분기
+  const unavVals = [
+    ['[교사불가]'], ['교사명', '슬롯들'],
+    ['교사01', '수5'],
+    ['교사09(행35)', '월1, 화3']
+  ];
+  const pu = parseConfig(unavVals);
+  check('교사불가 파싱 교사01(행 없음)', eq(pu.unavailable[0], { name: '교사01', slots: [20] }));
+  check('교사불가 파싱 교사09(행35)', eq(pu.unavailable[1], { name: '교사09', slots: [0, 10], row: 35 }));
+
+  // 7b. 콘텐츠 보존 강화: 무반 비고 + 블록 내 stray 행 + 블록 이전 주석 행.
+  function normRow(row) {
+    var r = (row || []).map(function (c) { return String(c == null ? '' : c); });
+    while (r.length && r[r.length - 1] === '') r.pop();
+    return JSON.stringify(r);
+  }
+  function hasContent(row) {
+    return (row || []).some(function (c) { return String(c == null ? '' : c).trim() !== ''; });
+  }
+  function groupNonEmpty(values) {
+    var out = {}, cur = '__outside__';
+    (values || []).forEach(function (row) {
+      var first = String((row && row[0]) != null ? row[0] : '').trim();
+      if (/^\[.*\]$/.test(first)) { cur = first; return; }
+      if (!hasContent(row)) return;
+      (out[cur] = out[cur] || []).push(normRow(row));
+    });
+    return out;
+  }
+  function eqMultiset(a, b) {
+    var ka = Object.keys(a).sort(), kb = Object.keys(b).sort();
+    if (!eq(ka, kb)) return false;
+    return ka.every(function (k) { return eq(a[k].slice().sort(), b[k].slice().sort()); });
+  }
+
+  const values = [
+    ['※ 자동생성 주의'],                          // __outside__ 주석
+    ['[고정블록]'],
+    ['슬롯', '라벨', '적용학년'],
+    ['월3', 'Counseling', '전체'],
+    ['화7', 'S.A', '7,8,9'],
+    ['월9', '수기 잘못된 슬롯'],                    // 고정블록 stray(슬롯 파싱 실패)
+    [''],
+    ['[무반과목]'],
+    ['과목명', '대상학급', '비고'],
+    ['Cal12', '12전체', '수기 비고'],              // 무반 비고 보존 대상
+    ['JMA', '', ''],
+    ['', '무반 수기 코멘트'],                       // 무반 stray(첫 셀 빈)
+    [''],
+    ['[팀티칭]'],
+    ['과목명', '교사들'],
+    ['Cal12', '교사04, 교사07'],
+    [''],
+    ['[연결그룹]'],
+    ['그룹명', '과목들'],
+    ['제2외', 'Honors Japanese, Honors German'],
+    [''],
+    ['[교사불가]'],
+    ['교사명', '슬롯들'],
+    [''],
+    ['[고정수업]'],
+    ['과목명', '교시들'],
+    ['수학보충8', '수7'],
+    [''],
+    ['[정규교시]'],
+    ['학년', '요일', '교시']
+  ];
+
+  const p1 = parseConfig(values);
+  check('무반 비고 보존 classlessNotes.Cal12', p1.classlessNotes.Cal12 === '수기 비고');
+  check('무반 비고 없는 항목 제외(JMA)', p1.classlessNotes.JMA === undefined);
+  check('rawExtras __outside__ 보존', p1.rawExtras['__outside__'] && p1.rawExtras['__outside__'].length === 1);
+  check('rawExtras 고정블록 stray 보존', p1.rawExtras['[고정블록]'] && p1.rawExtras['[고정블록]'].length === 1);
+  check('rawExtras 무반 stray 보존', p1.rawExtras['[무반과목]'] && p1.rawExtras['[무반과목]'].length === 1);
+
+  const p2 = parseConfig(serializeConfig(p1));
+  check('parse→serialize→parse 콘텐츠 안정', eq(p2, p1));
+
+  const g1 = groupNonEmpty(values);
+  const g2 = groupNonEmpty(serializeConfig(p1));
+  check('serialize(parse(values)) 블록별 비-빈 행 멀티셋 일치', eqMultiset(g1, g2));
+}
+
+/* =========================================================
+   7c. 학년 일부(partial-grade) — 파싱/왕복 + 일부↔정규/일부↔일부 이동
+   (충돌 판별 필드: checkMovesDelta().blocks[i].type === 'class' — findConflicts가
+    학급중복(정규 dup + 일부↔정규)에 type:'class', severity:'block'을 부여, 고정블록은 type:'fixed')
+   ========================================================= */
+{
+  var vP = [
+    ['[고정블록]'], ['슬롯', '라벨', '적용학년'],
+    ['월1', '부분금지', '12일부, 11'],
+    [''],
+    ['[무반과목]'], ['과목명', '대상학급', '비고'],
+    ['Elec12X', '12일부', ''],
+    [''],
+  ];
+  var cP = parseConfig(vP);
+  check('parseFixedBlocks partialGrades=[12]', cP.fixedBlocks[0].partialGrades.length === 1 && cP.fixedBlocks[0].partialGrades[0] === 12);
+  check('parseFixedBlocks grades=[11]', cP.fixedBlocks[0].grades[0] === 11);
+  check('classless 12일부 토큰 보존', cP.classless['Elec12X'][0] === '12일부');
+  check('serializeConfig 왕복(partialGrades 포함)', eq(parseConfig(CORE.serializeConfig(cP)), cP));
+
+  var cfgPart = { classless: { 'Elec12X': ['12일부'], 'Elec12Y': ['12일부'] }, fixedBlocks: [], teamTeaching: {}, linkedGroups: {} };
+  var mReg = CORE.buildModel([
+    ['교사A', '', ...Array.from({ length: 40 }, (_, i) => i === 0 ? 'Elec12X' : '')],
+    ['교사B', '', ...Array.from({ length: 40 }, (_, i) => i === 1 ? 'Kor12A' : '')],
+  ], 3);
+  var dReg = CORE.checkMovesDelta(mReg, cfgPart, [{ name: '교사A', row: 3, fromIdx: 0, toIdx: 1 }]);
+  check('일부↔정규 같은 슬롯 이동 차단', dReg.blocks.some(function (c) { return c.type === 'class'; }));
+  var mPP = CORE.buildModel([
+    ['교사A', '', ...Array.from({ length: 40 }, (_, i) => i === 0 ? 'Elec12X' : '')],
+    ['교사B', '', ...Array.from({ length: 40 }, (_, i) => i === 1 ? 'Elec12Y' : '')],
+  ], 3);
+  var dPP = CORE.checkMovesDelta(mPP, cfgPart, [{ name: '교사A', row: 3, fromIdx: 0, toIdx: 1 }]);
+  check('일부↔일부 같은 슬롯 이동 허용', !dPP.blocks.some(function (c) { return c.type === 'class'; }));
+}
+
+/* =========================================================
+   8. 멀티탭 mock 스토어 (revised/1차/2차)
+   ========================================================= */
+{
+  resetMockStore();
+  const store = getMockStore();
+  const tabs = ['revised', '1차', '2차'];
+  check('mock 3개 탭 존재', tabs.every((t) => !!store.sheets[t]));
+  check('mock 각 탭 83x42',
+    tabs.every((t) => store.sheets[t].length === 83 && store.sheets[t].every((r) => r.length === 42)));
+  check('mockListTabs 3개 이상 & isTimetable/dataStart',
+    mockListTabs(store).length >= 3 && mockListTabs(store).every((m) => m.isTimetable && m.dataStart === 3));
+}
+
+/* =========================================================
+   9. mockSaveConfig 왕복 (serializeConfig → store.config → parseConfig)
+   ========================================================= */
+{
+  resetMockStore();
+  const store = getMockStore();
+  const cfg = { fixedBlocks: [{ day: 0, period: 3, label: 'X', grades: 'all', classes: [] }], classless: {}, teamTeaching: {}, linkedGroups: {} };
+  mockSaveConfig(store, CORE.serializeConfig(cfg));
+  const parsed = parseConfig(store.config);
+  check('mockSaveConfig 왕복 → fixedBlocks 1개', parsed.fixedBlocks.length === 1);
+  check("mockSaveConfig 왕복 → grades 'all'", parsed.fixedBlocks[0].grades === 'all');
+}
+
+/* =========================================================
+   10. 연결그룹 확장 이동 (순수 코어) — 그룹 상호 학급중복 예외로 block 없음
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const rows = [dataRow('A', { 0: 'KorA7A' }), dataRow('B', { 0: 'KorB7A' })];
+  const model = CORE.buildModel(rows, 3);
+  const config = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: { '분반7A': ['KorA7A', 'KorB7A'] } };
+  const expanded = CORE.expandUnit(model, config, { name: 'A', row: 3, fromIdx: 0, toIdx: 1 });
+  check('연결그룹 확장 → 2건 이동', expanded.length === 2);
+  const delta = CORE.checkMovesDelta(model, config, expanded);
+  check('연결그룹 상호 학급중복 예외 → block 없음', delta.blocks.length === 0);
+}
+
+/* =========================================================
+   11. 반 단위 고정블록 위반 → block (409 트리거 조건)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const rows = [dataRow('A', { 0: 'Kor7A' })];
+  const model = CORE.buildModel(rows, 3);
+  const config = { fixedBlocks: [{ day: 0, period: 2, label: '금지', grades: [], classes: ['7A'] }], classless: {}, teamTeaching: {}, linkedGroups: {} };
+  const delta = CORE.checkMovesDelta(model, config, [{ name: 'A', row: 3, fromIdx: 0, toIdx: 1 }]);
+  check('반단위 고정블록 슬롯 진입 → block 발생(409)', delta.blocks.length > 0);
+}
+
+/* =========================================================
+   12. hashValues 결정성 + 민감도
+   ========================================================= */
+{
+  const v = [['[고정블록]'], ['슬롯', '라벨', '적용학년'], ['월3', 'X', '전체']];
+  const v2 = [['[고정블록]'], ['슬롯', '라벨', '적용학년'], ['월3', 'X', '전체']];
+  const v3 = [['[고정블록]'], ['슬롯', '라벨', '적용학년'], ['월3', 'Y', '전체']];
+  check('hashValues 동일 입력 → 동일 해시', hashValues(v) === hashValues(v2));
+  check('hashValues 셀 변경 → 다른 해시', hashValues(v) !== hashValues(v3));
+  check('hashValues 빈 배열 결정적', hashValues([]) === hashValues([]));
+}
+
+/* =========================================================
+   13. incompleteUnits — 연결그룹 단위 이동 온전성
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const rows = [dataRow('A', { 0: 'KorA7A' }), dataRow('B', { 0: 'KorB7A' })];
+  const model = CORE.buildModel(rows, 3);
+  const config = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: { '분반7A': ['KorA7A', 'KorB7A'] } };
+  const full = CORE.expandUnit(model, config, { name: 'A', row: 3, fromIdx: 0, toIdx: 1 });
+  check('전체 확장 단위 → incompleteUnits 빈 배열', eq(incompleteUnits(model, config, full, CORE.expandUnit), []));
+  const partial = full.slice(0, 1); // 1건만(부분 단위)
+  check('부분 단위(1건 누락) → incompleteUnits 비어있지 않음',
+    incompleteUnits(model, config, partial, CORE.expandUnit).length > 0);
+}
+
+/* =========================================================
+   14. parseLinkedGroups — '연결그룹' 탭 파싱(그룹핑 + 그룹 내 중복 제거)
+   ========================================================= */
+{
+  const rows = [
+    ['과목명', '교사명', '시간표 표기명', '그룹'],
+    ['Honors Chinese', '교사35', 'Honors Chinese', 'Elective_A'],
+    ['Statistics', '교사09', 'Statistics', 'Elective_A'],
+    ['STEAM R&E', '교사19', 'STEAM R&E', 'Elective_C'],
+    ['STEAM R&E', '교사30', 'STEAM R&E', 'Elective_C'], // 팀티칭 중복 → 1개로
+    ['Training', '교사25', 'Training', 'Elective_C'],
+    ['Training', '교사24', 'Training', 'Elective_D'],   // 다른 그룹 동일 표기명 → 별개 유지
+    ['PreCal11A', '수학1', 'PreCal11A', 'PreCal+APCalAB'],
+    ['', '', '', 'EmptyGroup']                          // 표기명 없음 → skip
+  ];
+  const lg = parseLinkedGroups(rows);
+  check('parseLinkedGroups Elective_A 그룹핑', eq(lg.groups['Elective_A'], ['Honors Chinese', 'Statistics']));
+  check('parseLinkedGroups 그룹 내 중복 제거(STEAM R&E 1개)', eq(lg.groups['Elective_C'], ['STEAM R&E', 'Training']));
+  check('parseLinkedGroups 다른 그룹의 동일 표기명 유지(Training in D)', eq(lg.groups['Elective_D'], ['Training']));
+  check('parseLinkedGroups 표기명 없는 행 무시', lg.groups['EmptyGroup'] === undefined);
+  check('parseLinkedGroups 헤더행 skip', lg.groups['그룹'] === undefined);
+  check('parseLinkedGroups 구schema pinned 없음', eq(lg.pinned, {}));
+  check('parseLinkedGroups 구schema warnings 없음', eq(lg.warnings, []));
+}
+
+/* =========================================================
+   14b. parseLinkedGroups — 신schema(고정수업시간) + 경고
+   ========================================================= */
+{
+  const rows = [
+    ['학년','과목명','교사명','시간표 표기명','고정수업시간','그룹'],
+    ['', 'Statistics', '교사09', 'Statistics', '월5, 월6, 수5, 수6', 'Elective_A'],
+    ['', 'Honors Chinese', '교사35', 'Honors Chinese', '', 'Elective_A'],
+    ['', 'Sports Health', '교사26', 'Sports Health', '월5, 수5', 'Elective_B2'],
+    ['', 'AP World History', '교사16', 'AP World History', '화7, 확8, 목7, 목8', 'Elective_D'],
+    ['', 'Training', '교사25', 'Training', '월7, 월8, 수7, 수8', 'Elective_C'],
+    ['', 'Training', '교사24', 'Training', '화7, 확8, 목7, 목8', 'Elective_D'],
+  ];
+  const lg = parseLinkedGroups(rows);
+  check('parseLinkedGroups 신schema groups', eq(lg.groups['Elective_A'], ['Statistics','Honors Chinese']));
+  check('parseLinkedGroups pinned Statistics=[4,5,20,21]', eq(lg.pinned['Statistics'], [4,5,20,21]));
+  check('parseLinkedGroups pinned 월5,수5=[4,20]', eq(lg.pinned['Sports Health'], [4,20]));
+  check('parseLinkedGroups 빈 고정수업시간 → pinned 없음', lg.pinned['Honors Chinese'] === undefined);
+  check("parseLinkedGroups '확8' 인식불가 → warnings 포함", lg.warnings.indexOf('확8') !== -1);
+  check("parseLinkedGroups '확8' 인식불가 → 해당 idx 미포함(화7,목7,목8만)", eq(lg.pinned['AP World History'], [14,30,31]));
+  check('parseLinkedGroups 동일 표기명 union(Training C+D)', eq(lg.pinned['Training'], [6,7,14,22,23,30,31]));
+  check('parseLinkedGroups warnings 중복 제거', lg.warnings.filter(function(w){return w==='확8';}).length === 1);
+}
+
+/* =========================================================
+   14c. parseLinkedGroups — 학년 열 파싱(grades)
+   ========================================================= */
+{
+  const rows = [
+    ['학년','과목명','교사명','시간표 표기명','고정수업시간','그룹'],
+    ['11,12', 'AP Statistics', '교사09', 'AP Statistics', '', 'Elective_A'],
+    ['10,11', 'Statistics', '교사09', 'Statistics', '', 'Elective_B'],
+    ['12.0', 'Honors Chinese', '교사35', 'Honors Chinese', '', 'Elective_A'],
+    ['', 'Sports Health', '교사26', 'Sports Health', '', 'Elective_B2'],
+    ['abc', 'Garbage Subject', '교사16', 'Garbage Subject', '', 'Elective_D'],
+  ];
+  const lg = parseLinkedGroups(rows);
+  check('parseLinkedGroups grades AP Statistics=[11,12]', eq(lg.grades['AP Statistics'], [11,12]));
+  check('parseLinkedGroups grades Statistics=[10,11]', eq(lg.grades['Statistics'], [10,11]));
+  check("parseLinkedGroups grades 숫자형식 '12.0'→[12]", eq(lg.grades['Honors Chinese'], [12]));
+  check('parseLinkedGroups grades 빈 학년 → 미포함', lg.grades['Sports Health'] === undefined);
+  check('parseLinkedGroups grades 쓰레기 학년 → 미포함', lg.grades['Garbage Subject'] === undefined);
+}
+
+/* =========================================================
+   14d. deriveClasslessFromGrades — 수동 우선 파생
+   ========================================================= */
+{
+  const config = { classless: { 'Manual': ['12전체'] } };
+  const grades = { 'Manual': [10,11], 'Derived': [11,12], 'NoGrade': [] };
+  deriveClasslessFromGrades(config, grades);
+  check('deriveClasslessFromGrades Manual 유지(수동 우선)', eq(config.classless['Manual'], ['12전체']));
+  check('deriveClasslessFromGrades Derived=[11일부,12일부]', eq(config.classless['Derived'], ['11일부','12일부']));
+  check('deriveClasslessFromGrades classlessDerived.Derived===true', config.classlessDerived['Derived'] === true);
+  check('deriveClasslessFromGrades Manual 파생표시 없음', config.classlessDerived['Manual'] === undefined);
+  check('deriveClasslessFromGrades NoGrade 미추가',
+    Object.prototype.hasOwnProperty.call(config.classless, 'NoGrade') === false);
+}
+
+// ---- deptBoundaries: 실측 이름 시퀀스 + 중복이름(교사09) 오매핑 방어 ----
+(function () {
+  var depts = {
+    names: {
+      '교사01': '국어', '교사02': '국어', '교사03': '국어',
+      '교사04': '수학', '교사06': '수학', '교사07': '수학', 'Teacher08': '수학', 'Teacher43': '수학',
+      'Teacher10': '영어', '교사11': '영어', 'Teacher12': '영어', 'Teacher13': '영어', 'Teacher14': '영어', 'English1': '영어',
+      '교사16': '사회', '교사17': '사회', 'Teacher18': '사회', '교사19': '사회',
+      '교사20': '과학', '교사22': '과학', 'Teacher23': '과학',
+      '교사24': '태권도', '교사25': '태권도', '교사26': '태권도', '교사27': '태권도',
+      '교사28': '예술', '교사29': '예술', '교사30': '예술',
+      '교사31': '정보', '교사09': '정보', '교사32': '정보',
+      '교사33': '제2외국어', '교사34': '제2외국어', '교사35': '제2외국어', 'Teacher36': '제2외국어', '교사37': '제2외국어',
+      '교사38': '성경', '교사39': '성경', '교사40': '성경', '교사44': '제2외국어'
+    },
+    order: ['국어', '수학', '영어', '사회', '과학', '태권도', '예술', '정보', '제2외국어', '성경']
+  };
+  var seq = [
+    [3, '교사01'], [4, '교사02'], [5, '교사03'], [6, '교사04'], [7, '교사05'], [8, '교사06'],
+    [9, '교사07'], [10, 'Teacher08'], [11, '교사09'], [12, 'Teacher10'], [13, '교사11'], [14, 'Teacher12'],
+    [15, 'Teacher13'], [16, 'Teacher14'], [17, 'Teacher15'], [18, '교사16'], [19, '교사17'], [20, 'Teacher18'],
+    [21, '교사19'], [22, '교사20'], [23, 'Teacher21'], [24, '교사22'], [25, 'Teacher23'], [26, '교사24'],
+    [27, '교사25'], [28, '교사26'], [29, '교사27'], [30, '교사28'], [31, '교사29'], [32, '교사30'],
+    [33, '교사31'], [34, '교사32'], [35, '교사09'], [36, '교사33'], [37, '교사34'], [38, '교사35'],
+    [39, 'Teacher36'], [40, '교사37'], [41, '교사38'], [42, '교사39'], [43, '교사40'], [44, '교사41'], [45, '교사42']
+  ];
+  var entries = seq.map(function (p) { return { name: p[1], row: p[0], type: 'teacher' }; });
+  entries.push({ name: 'RA1', row: 46, type: 'raSlot' });
+  var got = deptBoundaries(entries, depts);
+  var expected = [6, 12, 18, 22, 26, 30, 33, 36, 41, 46];
+  check('deptBoundaries 실측 시퀀스 경계행 = [6,12,18,22,26,30,33,36,41,46] (got ' + JSON.stringify(got) + ')',
+    JSON.stringify(got) === JSON.stringify(expected));
+  check('deptBoundaries: 교사09(11행) 오매핑 무시 — 경계선 없음', got.indexOf(11) === -1);
+  check('deptBoundaries: Teacher10(12행, 영어) 경계선 존재', got.indexOf(12) !== -1);
+  check('deptBoundaries: depts=null → []', JSON.stringify(deptBoundaries(entries, null)) === '[]');
+  var pd = parseDepts([
+    ['교사명', '교과', '주임여부', '', '배치순서'],
+    ['교사01', '국어', '주임', '', '국어'],
+    ['교사04', '수학', '주임', '', '수학'],
+    ['', '', '', '', '영어']
+  ]);
+  check('parseDepts: names 매핑', pd && pd.names['교사01'] === '국어' && pd.names['교사04'] === '수학');
+  check('parseDepts: order 순서', pd && JSON.stringify(pd.order) === JSON.stringify(['국어', '수학', '영어']));
+  check('parseDepts: heads(주임) 수집', pd && JSON.stringify(pd.heads) === JSON.stringify(['교사01', '교사04']));
+})();
+
+/* =========================================================
+   15. 학년별 시간 매트릭스 매핑 (gradeSlotState / toggleGradeSlot)
+   ========================================================= */
+{
+  // CHAPEL 전체(all) 규칙: 전 학년 불가
+  const allBlocks = [{ day: 2, period: 3, label: 'CHAPEL', grades: 'all', classes: [] }];
+  check("gradeSlotState all → 7학년 불가", gradeSlotState(allBlocks, 2, 3, 7) === '불가');
+  check("gradeSlotState all → 12학년 불가", gradeSlotState(allBlocks, 2, 3, 12) === '불가');
+  check("gradeSlotState 규칙 없는 슬롯 → 가능", gradeSlotState(allBlocks, 0, 1, 7) === '가능');
+
+  // 배열 grades
+  const arrBlocks = [{ day: 1, period: 7, label: '', grades: [7, 8, 9], classes: [] }];
+  check("gradeSlotState [7,8,9] → 8학년 불가", gradeSlotState(arrBlocks, 1, 7, 8) === '불가');
+  check("gradeSlotState [7,8,9] → 10학년 가능", gradeSlotState(arrBlocks, 1, 7, 10) === '가능');
+
+  // 반 단위만 → 일부
+  const partBlocks = [{ day: 0, period: 2, label: '', grades: [], classes: ['7A'] }];
+  check("gradeSlotState 반단위만 7 → 일부", gradeSlotState(partBlocks, 0, 2, 7) === '일부');
+  check("gradeSlotState 반단위 8 무관 → 가능", gradeSlotState(partBlocks, 0, 2, 8) === '가능');
+
+  // 다중 규칙(비정상) → 첫 규칙 기준, 크래시 없음
+  const dupBlocks = [
+    { day: 3, period: 5, label: '', grades: [7], classes: [] },
+    { day: 3, period: 5, label: '', grades: [8], classes: [] }
+  ];
+  check("gradeSlotState 다중규칙 첫 규칙 기준(7 불가)", gradeSlotState(dupBlocks, 3, 5, 7) === '불가');
+  check("gradeSlotState 다중규칙 첫 규칙 기준(8 가능)", gradeSlotState(dupBlocks, 3, 5, 8) === '가능');
+
+  // toggle: 신규 생성 (가능→불가, 규칙 없음)
+  const t1 = [];
+  toggleGradeSlot(t1, 0, 5, 7);
+  check("toggle 신규 생성", t1.length === 1 && t1[0].day === 0 && t1[0].period === 5 && eq(t1[0].grades, [7]) && t1[0].label === '' && eq(t1[0].classes, []));
+
+  // toggle: 기존 규칙에 학년 추가
+  const t2 = [{ day: 0, period: 5, label: '', grades: [7], classes: [] }];
+  toggleGradeSlot(t2, 0, 5, 9);
+  check("toggle 기존 규칙에 추가", t2.length === 1 && eq(t2[0].grades, [7, 9]));
+
+  // toggle: all 전개 후 한 학년 제거 → 나머지 5학년 유지 + 라벨 규칙 보존
+  const t3 = [{ day: 2, period: 3, label: 'CHAPEL', grades: 'all', classes: [] }];
+  toggleGradeSlot(t3, 2, 3, 7);
+  check("toggle all 전개 후 7 제거 → [8,9,10,11,12]", eq(t3[0].grades, [8, 9, 10, 11, 12]));
+  check("toggle all 전개 후 규칙·라벨 유지", t3.length === 1 && t3[0].label === 'CHAPEL');
+
+  // toggle: 불가→가능, 규칙이 완전히 비면 삭제
+  const t4 = [{ day: 0, period: 5, label: '', grades: [7], classes: [] }];
+  toggleGradeSlot(t4, 0, 5, 7);
+  check("toggle 마지막 학년 제거 → 규칙 삭제", t4.length === 0);
+
+  // toggle: 라벨/반 있는 규칙은 학년만 비어도 유지
+  const t5 = [{ day: 0, period: 5, label: 'X', grades: [7], classes: ['8A'] }];
+  toggleGradeSlot(t5, 0, 5, 7);
+  check("toggle 라벨·반 있는 규칙은 유지", t5.length === 1 && eq(t5[0].grades, []) && t5[0].label === 'X' && eq(t5[0].classes, ['8A']));
+
+  // toggle: 일부→승격(학년 추가, 반 유지)
+  const t6 = [{ day: 0, period: 2, label: '', grades: [], classes: ['7A'] }];
+  toggleGradeSlot(t6, 0, 2, 7);
+  check("toggle 일부→불가 승격", eq(t6[0].grades, [7]) && eq(t6[0].classes, ['7A']));
+  check("toggle 승격 후 상태 불가", gradeSlotState(t6, 0, 2, 7) === '불가');
+}
+
+/* =========================================================
+   15b. 학년별 공강 현황 (gradeFreeState, 조회 전용)
+   ========================================================= */
+{
+  function gfEntry(subj, day, period) {
+    var slots = Array(40).fill('');
+    slots[day * 8 + (period - 1)] = subj;
+    return { name: 'T', room: '', type: 'teacher', row: 3, slots: slots };
+  }
+  function gfModel(entries) { return { entries: entries }; }
+
+  // CASE 전체: 빈 모델 → 세 반 모두 공강
+  var rAll = gradeFreeState(gfModel([]), {}, 10, { day: 0, period: 1 });
+  check("gradeFree 전체 → label 전체/kind all", rAll.label === '전체' && rAll.kind === 'all');
+
+  // CASE 반 나열: Alge10A 하나 → 10A busy, 나머지 free
+  var rSome = gradeFreeState(gfModel([gfEntry('Alge10A', 0, 1)]), {}, 10, { day: 0, period: 1 });
+  check("gradeFree 반나열 → '10B, 10C'/some", rSome.label === '10B, 10C' && rSome.kind === 'some');
+  check("gradeFree 반나열 → 10A busy", rSome.classes['10A'] === 'busy');
+
+  // CASE 일부: '12일부' 매핑 과목만 존재
+  var rPart = gradeFreeState(gfModel([gfEntry('AP Statistics', 0, 5)]),
+    { classless: { 'AP Statistics': ['12일부'] } }, 12, { day: 0, period: 5 });
+  check("gradeFree 일부 → label 일부/kind partial", rPart.label === '일부' && rPart.kind === 'partial');
+
+  // CASE G전체: '12전체' → 세 반 모두 busy
+  var rBusy = gradeFreeState(gfModel([gfEntry('Cal12', 0, 1)]),
+    { classless: { 'Cal12': ['12전체'] } }, 12, { day: 0, period: 1 });
+  check("gradeFree G전체 → kind none/label ''", rBusy.kind === 'none' && rBusy.label === '');
+  check("gradeFree G전체 → 세 반 busy",
+    rBusy.classes['12A'] === 'busy' && rBusy.classes['12B'] === 'busy' && rBusy.classes['12C'] === 'busy');
+
+  // CASE 반 토큰 매핑: '무반X' → ['10A','10B']
+  var rTok = gradeFreeState(gfModel([gfEntry('무반X', 0, 1)]),
+    { classless: { '무반X': ['10A', '10B'] } }, 10, { day: 0, period: 1 });
+  check("gradeFree 반토큰 → 10A&10B busy",
+    rTok.busyClasses.indexOf('10A') !== -1 && rTok.busyClasses.indexOf('10B') !== -1);
+  check("gradeFree 반토큰 → free 10C/label 10C/some",
+    eq(rTok.freeClasses, ['10C']) && rTok.label === '10C' && rTok.kind === 'some');
+
+  // CASE NA(대상없음): 빈 매핑 [] → 기여 없음
+  var rNA = gradeFreeState(gfModel([gfEntry('JMA', 0, 1)]),
+    { classless: { 'JMA': [] } }, 12, { day: 0, period: 1 });
+  check("gradeFree 대상없음 → 전체 공강", rNA.label === '전체' && rNA.kind === 'all');
+
+  // CASE 미분류: classless에 없는 과목 → 무시
+  var rUn = gradeFreeState(gfModel([gfEntry('Unknown', 0, 1)]),
+    { classless: {} }, 10, { day: 0, period: 1 });
+  check("gradeFree 미분류 → 전체 공강", rUn.label === '전체' && rUn.kind === 'all');
+
+  // CASE partial + one busy: 12A 수업 + '12일부' → 12A busy, 12B/12C partial, free 없음
+  var rMix = gradeFreeState(gfModel([gfEntry('Kor12A', 0, 5), gfEntry('AP Statistics', 0, 5)]),
+    { classless: { 'AP Statistics': ['12일부'] } }, 12, { day: 0, period: 5 });
+  check("gradeFree partial+busy → 12A busy",
+    rMix.classes['12A'] === 'busy' && rMix.busyClasses.indexOf('12A') !== -1);
+  check("gradeFree partial+busy → 12B/12C partial",
+    rMix.classes['12B'] === 'partial' && rMix.classes['12C'] === 'partial');
+  check("gradeFree partial+busy → free 없음/label 일부/partial",
+    rMix.freeClasses.length === 0 && rMix.label === '일부' && rMix.kind === 'partial');
+
+  // fixedBlocks 학년 전체 금지: 월3 Counseling(grades:'all') → blocked+라벨 (10·12학년), 타 슬롯 무영향
+  var cfgCoun = { fixedBlocks: [{ day: 0, period: 3, label: 'Counseling', grades: 'all', classes: [], partialGrades: [] }] };
+  var rB10 = gradeFreeState(gfModel([]), cfgCoun, 10, { day: 0, period: 3 });
+  check("gradeFree 전체금지 → 10학년 blocked+라벨", rB10.kind === 'blocked' && rB10.label === 'Counseling' && rB10.freeClasses.length === 0);
+  var rB12 = gradeFreeState(gfModel([]), cfgCoun, 12, { day: 0, period: 3 });
+  check("gradeFree 전체금지 → 12학년 blocked+라벨", rB12.kind === 'blocked' && rB12.label === 'Counseling');
+  var rBoff = gradeFreeState(gfModel([]), cfgCoun, 10, { day: 0, period: 1 });
+  check("gradeFree 전체금지 → 타 슬롯 무영향(전체 공강)", rBoff.kind === 'all');
+
+  // fixedBlocks 학년 지정 금지: grades:[7,8,9] → 7학년 blocked, 10학년 정상 (7교시↑는 방과후라 6교시 사용)
+  var cfgSA = { fixedBlocks: [{ day: 1, period: 6, label: 'S.A', grades: [7, 8, 9], classes: [], partialGrades: [] }] };
+  var rSA7 = gradeFreeState(gfModel([]), cfgSA, 7, { day: 1, period: 6 });
+  check("gradeFree 학년지정금지 → 7학년 blocked", rSA7.kind === 'blocked' && rSA7.label === 'S.A');
+  var rSA10 = gradeFreeState(gfModel([]), cfgSA, 10, { day: 1, period: 6 });
+  check("gradeFree 학년지정금지 → 미포함 학년 정상(전체)", rSA10.kind === 'all');
+
+  // 7·8교시 방과후: period 7 → 금지 규칙이 있어도 kind 'after'/label '방과후' 우선
+  var cfgAfter = { fixedBlocks: [{ day: 1, period: 7, label: 'S.A', grades: [7, 8, 9], classes: [], partialGrades: [] }] };
+  var rAfter7 = gradeFreeState(gfModel([]), cfgAfter, 7, { day: 1, period: 7 });
+  check("gradeFree 7교시 → 방과후 after 우선", rAfter7.kind === 'after' && rAfter7.label === '방과후');
+  var rAfter6 = gradeFreeState(gfModel([]), cfgAfter, 7, { day: 1, period: 6 });
+  check("gradeFree 6교시 → 기존 판정 정상(전체 공강)", rAfter6.kind === 'all' && rAfter6.label === '전체');
+
+  // fixedBlocks 반 단위 금지: classes:['10A'] → 10A 제외, free 10B/10C
+  var cfgCls = { fixedBlocks: [{ day: 2, period: 1, label: '', grades: [], classes: ['10A'], partialGrades: [] }] };
+  var rCls = gradeFreeState(gfModel([]), cfgCls, 10, { day: 2, period: 1 });
+  check("gradeFree 반금지 → 10A blocked 제외", rCls.classes['10A'] === 'blocked' && rCls.freeClasses.indexOf('10A') === -1);
+  check("gradeFree 반금지 → free 10B,10C/some", eq(rCls.freeClasses, ['10B', '10C']) && rCls.kind === 'some' && rCls.label === '10B, 10C');
+  var rCls7 = gradeFreeState(gfModel([]), cfgCls, 7, { day: 2, period: 1 });
+  check("gradeFree 반금지 → 타 학년 무영향(전체)", rCls7.kind === 'all');
+
+  // fixedBlocks partialGrades(정규만 금지)는 공강 판정 무영향
+  var cfgPG = { fixedBlocks: [{ day: 0, period: 5, label: 'x', grades: [], classes: [], partialGrades: [12] }], classless: { 'AP Statistics': ['12일부'] } };
+  var rPG = gradeFreeState(gfModel([gfEntry('AP Statistics', 0, 5)]), cfgPG, 12, { day: 0, period: 5 });
+  check("gradeFree partialGrades 무영향 → 여전히 일부/partial", rPG.kind === 'partial' && rPG.label === '일부');
+  var rPGempty = gradeFreeState(gfModel([]), cfgPG, 12, { day: 0, period: 5 });
+  check("gradeFree partialGrades 무영향 → 규칙만으론 전체 공강", rPGempty.kind === 'all');
+}
+
+/* =========================================================
+   16. 고정수업시간(pinned) — 이동 차단 / 이탈 경고 / 왕복 제외
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const cfg = { pinned: { 'Stat': [4, 5, 20, 21] }, linkedGroups: {}, classless: {}, teamTeaching: {} };
+
+  // (1) 고정 과목 이동 차단(delta): Stat@idx4 → idx1
+  const model = CORE.buildModel([dataRow('교사99', { 4: 'Stat', 0: 'Kor7A' })], 3);
+  const d = CORE.checkMovesDelta(model, cfg, [{ name: '교사99', row: 3, fromIdx: 4, toIdx: 1 }]);
+  check('고정 과목 이동 → block 발생', d.blocks.length >= 1);
+  check('고정 과목 block 메시지 "고정 수업" 포함',
+    d.blocks.some(function (c) { return String(c.message).indexOf('고정 수업') !== -1; }));
+
+  // (2) 비고정 과목 이동은 허용: Kor7A@idx0 → idx2
+  const d2 = CORE.checkMovesDelta(model, cfg, [{ name: '교사99', row: 3, fromIdx: 0, toIdx: 2 }]);
+  check('비고정 과목 이동 → block 없음', d2.blocks.length === 0);
+
+  // (3) 이탈 경고: Stat@idx2(지정 슬롯 밖) → pinnedLeave warn
+  const model2 = CORE.buildModel([dataRow('교사99', { 2: 'Stat' })], 3);
+  const cf = CORE.findConflicts(model2, cfg);
+  check('고정 시간 이탈 → pinnedLeave 경고',
+    cf.some(function (c) { return c.type === 'pinnedLeave'; }));
+  check('pinnedLeave 메시지 "고정 시간 이탈" + "지정: 월5,월6,수5,수6" 포함',
+    cf.some(function (c) {
+      return String(c.message).indexOf('고정 시간 이탈') !== -1 &&
+        String(c.message).indexOf('지정: 월5,월6,수5,수6') !== -1;
+    }));
+
+  // (4) 왕복은 pinned 를 배제(설정 탭에 절대 기록 안 됨)
+  const cfg2 = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: { 'G': ['A', 'B'] }, unavailable: [], pinned: { 'A': [4, 5] } };
+  const round = parseConfig(CORE.serializeConfig(cfg2));
+  check('serializeConfig 왕복 → pinned 제외', round.pinned === undefined);
+  check('serializeConfig 왕복 → linkedGroups 보존', eq(round.linkedGroups, { 'G': ['A', 'B'] }));
+}
+
+/* =========================================================
+   17. 고정수업 수동설정(pinnedManual) — 파싱 / 직렬화 왕복 / 우선순위(resolvePinned)
+   ========================================================= */
+{
+  const serializeConfig = CORE.serializeConfig;
+  const resolvePinned = CORE.resolvePinned;
+
+  // (a) [고정수업] 파싱: 인식불가 라벨 무시, 슬롯 union/정렬, 슬롯 0개 과목 제외
+  const vals = [
+    ['[고정수업]'], ['과목명', '교시들'],
+    ['수학보충8', '수7, 수7, 월5'],   // 중복(수7=22) + 정렬(월5=4)
+    ['AI', '목7, 확8, 목8'],          // 확8 인식불가 무시(목7=30, 목8=31)
+    ['빈과목', '확9'],                 // 인식 슬롯 0개 → 제외
+  ];
+  const pm = parseConfig(vals).pinnedManual;
+  check('pinnedManual 수학보충8 union+정렬 [4,22]', eq(pm['수학보충8'], [4, 22]));
+  check('pinnedManual AI 인식불가(확8) 무시 → [30,31]', eq(pm['AI'], [30, 31]));
+  check('pinnedManual 인식 슬롯 0개 과목 제외', pm['빈과목'] === undefined);
+
+  // (b) 직렬화 왕복: pinnedManual + 기존 블록(linkedGroups) 보존
+  const cfg = {
+    fixedBlocks: [], classless: {}, teamTeaching: {},
+    linkedGroups: { 'G': ['A', 'B'] }, unavailable: [],
+    pinnedManual: { '수학보충8': [22], 'AI': [30, 31] }
+  };
+  const round = parseConfig(serializeConfig(cfg));
+  check('직렬화 왕복 → pinnedManual 보존', eq(round.pinnedManual, cfg.pinnedManual));
+  check('직렬화 왕복 → linkedGroups 보존', eq(round.linkedGroups, { 'G': ['A', 'B'] }));
+
+  // (c) 우선순위 resolvePinned
+  const linked = { 'Statistics': [4, 5, 20, 21] };
+  const rm = resolvePinned({ pinnedManual: { '수학보충8': [22] } }, linked);
+  check("resolvePinned manual 1개↑ → source='manual', linked 무시",
+    rm.pinnedSource === 'manual' && eq(rm.pinned, { '수학보충8': [22] }));
+  const rl = resolvePinned({ pinnedManual: {} }, linked);
+  check("resolvePinned manual 비면 → source='linked' & pinned=linked",
+    rl.pinnedSource === 'linked' && eq(rl.pinned, linked));
+  const rn = resolvePinned({ pinnedManual: {} }, {});
+  check("resolvePinned 둘 다 비면 → source='none' & pinned={}",
+    rn.pinnedSource === 'none' && eq(rn.pinned, {}));
+}
+
+/* =========================================================
+   18. planMovesTo — 복수 경로 열거(막힌 목적지 blocker 재배치)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  // A(행3): Eng7A @idx0 → idx1 이동 희망. idx1 은 B(행4)의 Kor7A(같은 학급 7A)가 점유 → 직접 이동 차단.
+  // B 는 Kor7A 를 여러 빈 슬롯으로 재배치 가능 → 서로 다른 무충돌 계획 다수.
+  const rows = [dataRow('A', { 0: 'Eng7A' }), dataRow('B', { 1: 'Kor7A' })];
+  const model = CORE.buildModel(rows, 3);
+  const config = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: {} };
+  const plans = CORE.planMovesTo(model, config, { name: 'A', row: 3, fromIdx: 0 }, 1);
+
+  check('planMovesTo ≥ 2개 경로 열거', plans.length >= 2);
+  check('planMovesTo 모든 경로 무충돌(checkMovesDelta blocks===0)',
+    plans.every(function (p) { return CV.checkMovesDelta(model, config, p.moves).blocks.length === 0; }));
+
+  function sig(moves) {
+    return moves.map(function (m) { return m.row + ':' + m.fromIdx + '→' + m.toIdx; }).sort().join('|');
+  }
+  const sigs = plans.map(function (p) { return sig(p.moves); });
+  check('planMovesTo 경로 서명 전부 고유(중복 없음)', new Set(sigs).size === sigs.length);
+  check('planMovesTo moves.length 오름차순 정렬',
+    plans.every(function (p, i) { return i === 0 || plans[i - 1].moves.length <= p.moves.length; }));
+}
+
+/* =========================================================
+   19. 경량 후보 스캔 planScanTo/planScanAll — 부분집합 스모크
+   (클라이언트 셀클릭 색칠 경로. 하드 불변식: 스캔 계획은 무충돌 + 같은
+    (target,to)에 planMovesTo 해 존재. 색칠: direct=green(재배치 없음)/chain=yellow.)
+   ========================================================= */
+{
+  const planScanTo = CORE.planScanTo;
+  const planScanAll = CORE.planScanAll;
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  // A(행3): Eng7A@idx0 → idx1(B의 Kor7A 점유, 같은 학급 7A). B 재배치로 연쇄 가능.
+  const rows = [dataRow('A', { 0: 'Eng7A' }), dataRow('B', { 1: 'Kor7A' })];
+  const model = CORE.buildModel(rows, 3);
+  const config = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: {} };
+  const move = { name: 'A', row: 3, fromIdx: 0 };
+
+  const arr = planScanAll(model, config, move);
+  check('planScanAll → 길이 40 배열', Array.isArray(arr) && arr.length === 40);
+  let hits = 0, dirty = 0, viol = 0, badKind = 0;
+  for (let d = 0; d < arr.length; d++) {
+    const p = arr[d];
+    if (!p) continue;
+    hits++;
+    if (CORE.checkMovesDelta(model, config, p.moves).blocks.length !== 0) dirty++;
+    if (CORE.planMovesTo(model, config, move, d).length === 0) viol++;
+    const relocated = p.moves.some(function (mv) { return mv.toIdx !== d; });
+    if ((p.kind === 'direct') === relocated) badKind++;
+  }
+  check('planScanAll 후보 존재', hits > 0);
+  check('planScanAll 계획 전부 무충돌(checkMovesDelta clean)', dirty === 0);
+  check('planScanAll hit ⟹ planMovesTo 해 존재(부분집합)', viol === 0);
+  check('planScanAll 색칠 의미 일치(direct⟺재배치없음)', badKind === 0);
+
+  // idx1: 연쇄 필요(B 점유) — planScanTo 도 계획 반환 + 무충돌 + planMovesTo 존재.
+  const s1 = planScanTo(model, config, move, 1);
+  check('planScanTo(막힌 idx1) 계획 반환', !!s1);
+  check('planScanTo(idx1) 무충돌 & planMovesTo 해 존재',
+    !!s1 && CORE.checkMovesDelta(model, config, s1.moves).blocks.length === 0
+    && CORE.planMovesTo(model, config, move, 1).length > 0);
+}
+
+/* =========================================================
+   20. planSwapTo — 두 열 맞교환(Kempe). 성공/실패 경계 + 부분집합 불변식.
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const baseCfg = () => ({ fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: {}, pinned: {}, unavailable: [] });
+
+  // (a) 단순 맞교환: A:X7A@0(→1), B:Y7A@1 → T 점유 Y7A 를 F(0)로 밀어내 성공.
+  {
+    const model = CORE.buildModel([dataRow('A', { 0: 'X7A' }), dataRow('B', { 1: 'Y7A' })], 3);
+    const cfg = baseCfg();
+    const sw = CORE.planSwapTo(model, cfg, { name: 'A', row: 3, fromIdx: 0 }, 1);
+    check('§20(a) 단순 맞교환 성공(non-null·swap·blocks0)',
+      !!sw && sw.kind === 'swap' && CV.checkMovesDelta(model, cfg, sw.moves).blocks.length === 0);
+  }
+
+  // (b) pinned: 밀려날 Y7A 가 idx1 에 고정 → 맞교환 불가 → null.
+  {
+    const model = CORE.buildModel([dataRow('A', { 0: 'X7A' }), dataRow('B', { 1: 'Y7A' })], 3);
+    const cfg = baseCfg(); cfg.pinned = { Y7A: [1] };
+    const sw = CORE.planSwapTo(model, cfg, { name: 'A', row: 3, fromIdx: 0 }, 1);
+    check('§20(b) pinned 점유행 → null', sw === null);
+  }
+
+  // (c) 해소 불가(홀수 사이클): 세 7A 가 두 열에 걸침 → 2색 불가 → null.
+  {
+    const model = CORE.buildModel([dataRow('A', { 0: 'X7A' }), dataRow('B', { 1: 'Z7A' }), dataRow('C', { 0: 'W7A' })], 3);
+    const cfg = baseCfg();
+    const sw = CORE.planSwapTo(model, cfg, { name: 'A', row: 3, fromIdx: 0 }, 1);
+    check('§20(c) 해소 불가(odd cycle) → null', sw === null);
+  }
+
+  // (c2) 자기 두 열 맞교환: B 가 F(0)·T(1) 양쪽에 다른 학급 과목 → 정상 해(과도 null 방지).
+  {
+    const model = CORE.buildModel([dataRow('A', { 0: 'X7A' }), dataRow('B', { 0: 'Q7C', 1: 'P7A' })], 3);
+    const cfg = baseCfg();
+    const sw = CORE.planSwapTo(model, cfg, { name: 'A', row: 3, fromIdx: 0 }, 1);
+    check('§20(c2) 자기 두 열 맞교환 성공',
+      !!sw && CV.checkMovesDelta(model, cfg, sw.moves).blocks.length === 0);
+  }
+
+  // (d) swap-only 슬롯 ⟹ planMovesTo 부분집합 불변식.
+  //   벽(pinned)이 빈슬롯 재배치를 전부 차단 → chain 실패, Pass3 swap 만 성공.
+  {
+    const wall = {}, wallSlots = [];
+    for (let i = 2; i < 40; i++) { wall[i] = 'WX7A'; wallSlots.push(i); }
+    const model = CORE.buildModel([
+      dataRow('A', { 0: 'AX7A' }),
+      dataRow('B', { 0: 'BY7C', 1: 'BX7A' }),
+      dataRow('W', wall),
+    ], 3);
+    const cfg = baseCfg(); cfg.pinned = { WX7A: wallSlots };
+    const move = { name: 'A', row: 3, fromIdx: 0 };
+    const scan = CORE.planScanAll(model, cfg, move);
+    check('§20(d) swap-only 슬롯 scan[1].kind===swap',
+      !!scan[1] && scan[1].kind === 'swap' && CORE.planMovesTo(model, cfg, move, 1).length > 0);
+    let viol = 0;
+    for (let d = 0; d < scan.length; d++) {
+      if (scan[d] && scan[d].kind === 'swap' && CORE.planMovesTo(model, cfg, move, d).length === 0) viol++;
+    }
+    check('§20(d) 모든 swap scan hit ⟹ planMovesTo≥1 (viol=0)', viol === 0);
+  }
+}
+
+/* =========================================================
+   21. RA 감독 배정 — assignCandidates / RA 미분류 제외 / RA 점유 차단 / raOpError
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const baseCfg = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: {} };
+
+  // (1) assignCandidates: 정렬 + 점유 제외 + 불가시간 제외 + ra/lessons 카운트
+  const acRows = [
+    dataRow('교사A', { 0: 'Kor7A', 1: 'RA' }),   // total=2, ra=1, lessons=1 ; idx5 비어있음
+    dataRow('교사B', {}),                         // total=0 ; idx5 비어있음
+    dataRow('교사C', { 5: 'Math8A' }),            // idx5 점유 → 제외
+    dataRow('교사D', { 0: 'Eng9A' }),             // idx5 비어있으나 불가시간 → 제외
+  ];
+  const acModel = CORE.buildModel(acRows, 3);
+  const acConfig = { unavailable: [{ name: '교사D', slots: [5] }] };
+  const cands = assignCandidates(acModel, acConfig, 5);
+  check('assignCandidates 점유 슬롯 교사 제외(교사C)', !cands.some((c) => c.name === '교사C'));
+  check('assignCandidates 불가시간 교사 제외(교사D)', !cands.some((c) => c.name === '교사D'));
+  check('assignCandidates 후보 = [교사B, 교사A] (total asc)', eq(cands.map((c) => c.name), ['교사B', '교사A']));
+  const aCand = cands.find((c) => c.name === '교사A');
+  check('assignCandidates 교사A total=2/ra=1/lessons=1', !!aCand && aCand.total === 2 && aCand.ra === 1 && aCand.lessons === 1);
+
+  // 정렬 동률(total 동일) → name 오름차순
+  const tieModel = CORE.buildModel([dataRow('나', { 0: 'X7A' }), dataRow('가', { 0: 'Y7A' })], 3);
+  const tie = assignCandidates(tieModel, { unavailable: [] }, 5);
+  check('assignCandidates 동률 name asc(가 먼저)', eq(tie.map((c) => c.name), ['가', '나']));
+
+  // (2) RA 는 미분류로 플래그되지 않음, 미지 과목(ZZZ)은 미분류
+  const raModel = CORE.buildModel([dataRow('T1', { 3: 'RA' }), dataRow('T2', { 4: 'ZZZ' })], 3);
+  const rc = CORE.findConflicts(raModel, baseCfg);
+  check('RA 셀은 unclassified 아님', !rc.some((c) => c.type === 'unclassified' && c.subject === 'RA'));
+  check('미지 과목 ZZZ 는 unclassified', rc.some((c) => c.type === 'unclassified' && c.subject === 'ZZZ'));
+
+  // (3) RA 점유는 여전히 이동 차단(교사 중복): idx0 수업을 RA 점유 idx1 로 이동
+  const occModel = CORE.buildModel([dataRow('T', { 0: 'Kor7A', 1: 'RA' })], 3);
+  const occDelta = CORE.checkMovesDelta(occModel, baseCfg, [{ name: 'T', row: 3, fromIdx: 0, toIdx: 1 }]);
+  check('RA 점유 슬롯으로 이동 → block(교사 중복)', occDelta.blocks.length > 0);
+
+  // (4) raOpError: 배정/해제 재검증
+  const opModel = CORE.buildModel([dataRow('T', { 1: 'RA', 2: 'Kor7A' })], 3);  // row3 teacher: idx0 빈칸, idx1 RA, idx2 수업
+  check('raOpError 빈 슬롯 배정 → null', raOpError(opModel, [{ row: 3, idx: 0 }], []) === null);
+  check('raOpError 점유 슬롯 배정 → cell_occupied/409', eq(raOpError(opModel, [{ row: 3, idx: 2 }], []), { error: 'cell_occupied', status: 409 }));
+  check('raOpError 미지 행 배정 → invalid_assign/400', eq(raOpError(opModel, [{ row: 999, idx: 0 }], []), { error: 'invalid_assign', status: 400 }));
+  const synthModel = { entries: [{ row: 3, type: 'teacher', slots: opModel.entries[0].slots }, { row: 50, type: 'raSlot', slots: new Array(40).fill('') }] };
+  check('raOpError raSlot(비교사) 행 배정 → invalid_assign/400', eq(raOpError(synthModel, [{ row: 50, idx: 0 }], []), { error: 'invalid_assign', status: 400 }));
+  check('raOpError RA 셀 해제 → null', raOpError(opModel, [], [{ row: 3, idx: 1 }]) === null);
+  check('raOpError 비-RA 셀 해제 → not_ra/409', eq(raOpError(opModel, [], [{ row: 3, idx: 2 }]), { error: 'not_ra', status: 409 }));
+
+  // (5) raOpError 반 단위 값 검증 + duplicate_ra
+  const vModel = CORE.buildModel([dataRow('T', { 2: 'Kor7A' })], 3);  // row3: idx0 빈칸, idx2 수업
+  check('raOpError value=RA11B 빈 슬롯 배정 → null', raOpError(vModel, [{ row: 3, idx: 0, value: 'RA11B' }], []) === null);
+  check('raOpError value=RA 배정 → null', raOpError(vModel, [{ row: 3, idx: 0, value: 'RA' }], []) === null);
+  check('raOpError value=XYZ → invalid_value/400', eq(raOpError(vModel, [{ row: 3, idx: 0, value: 'XYZ' }], []), { error: 'invalid_value', status: 400 }));
+  // duplicate_ra: 교사A idx0에 RA11B, 교사B(idx0 빈칸) 같은 값 배정 시도
+  const dupModel = CORE.buildModel([dataRow('A', { 0: 'RA11B' }), dataRow('B', {})], 3);  // A=row3, B=row4
+  check('raOpError 반 중복 배정 → duplicate_ra/409', eq(raOpError(dupModel, [{ row: 4, idx: 0, value: 'RA11B' }], []), { error: 'duplicate_ra', status: 409 }));
+  // 순수 RA 는 중복 허용
+  const dupRaModel = CORE.buildModel([dataRow('A', { 0: 'RA' }), dataRow('B', {})], 3);
+  check('raOpError 순수 RA 중복 배정 허용 → null', raOpError(dupRaModel, [{ row: 4, idx: 0, value: 'RA' }], []) === null);
+  // clear: RA11B 셀 해제 가능, 실수업 셀 해제 불가
+  const clrModel = CORE.buildModel([dataRow('T', { 0: 'RA11B', 2: 'Kor7A' })], 3);
+  check('raOpError RA11B 셀 해제 → null', raOpError(clrModel, [], [{ row: 3, idx: 0 }]) === null);
+  check('raOpError 실수업 셀 해제 → not_ra/409', eq(raOpError(clrModel, [], [{ row: 3, idx: 2 }]), { error: 'not_ra', status: 409 }));
+
+  // (6) isRaValue / RA_VALUE_RE
+  check('isRaValue RA/RA11B 참, RA13A/XYZ/빈값 거짓',
+    isRaValue('RA') && isRaValue('RA11B') && !isRaValue('RA13A') && !isRaValue('XYZ') && !isRaValue(''));
+  check('isRaValue RA12(학년 단위) 참', isRaValue('RA12') === true);
+
+  // (7) gradeFreeState: RA+반 값은 busy 아님 — 반 free 유지 + raClasses/covered
+  const gfRa = gradeFreeState(CORE.buildModel([dataRow('T', { 0: 'RA11B' })], 3), baseCfg, 11, { day: 0, period: 1 });
+  check('gradeFree RA11B → 11B free 유지', gfRa.freeClasses.indexOf('11B') !== -1);
+  check('gradeFree RA11B → 11B busy 아님', gfRa.busyClasses.indexOf('11B') === -1);
+  check('gradeFree RA11B → raClasses 11B 포함', gfRa.raClasses.indexOf('11B') !== -1);
+  check('gradeFree RA11B → 라벨 전체/kind all(배정 전 동일)', gfRa.kind === 'all' && gfRa.label === '전체');
+  check('gradeFree 일부 반만 RA배정 → covered false', gfRa.covered === false);
+  // 공강 반 전부 RA배정 → covered true
+  const gfCovAll = gradeFreeState(CORE.buildModel([dataRow('A', { 0: 'RA11A' }), dataRow('B', { 0: 'RA11B' }), dataRow('C', { 0: 'RA11C' })], 3), baseCfg, 11, { day: 0, period: 1 });
+  check('gradeFree 전 반 RA배정 → covered true', gfCovAll.covered === true && gfCovAll.kind === 'all');
+  // partial + 순수 RA(legacy) 감독 → 학년 커버 안 함 → covered false
+  const partCfg = Object.assign({}, baseCfg, { classless: { 'AP Statistics': ['12일부'] } });
+  const gfPartRA = gradeFreeState(CORE.buildModel([dataRow('S', { 4: 'AP Statistics' }), dataRow('R', { 4: 'RA' })], 3), partCfg, 12, { day: 0, period: 5 });
+  check('gradeFree partial + 순수 RA(legacy) → covered false', gfPartRA.kind === 'partial' && gfPartRA.covered === false);
+  // partial + 학년 단위 RA12 감독 → covered true
+  const gfPartRA12 = gradeFreeState(CORE.buildModel([dataRow('S', { 4: 'AP Statistics' }), dataRow('R', { 4: 'RA12' })], 3), partCfg, 12, { day: 0, period: 5 });
+  check('gradeFree partial + RA12 → covered true', gfPartRA12.kind === 'partial' && gfPartRA12.covered === true);
+  const gfPartNo = gradeFreeState(CORE.buildModel([dataRow('S', { 4: 'AP Statistics' })], 3), partCfg, 12, { day: 0, period: 5 });
+  check('gradeFree partial + RA 감독 없음 → covered false', gfPartNo.covered === false);
+
+  // (8) core: RA11B 는 미분류 아님 + 같은 반 이동 차단
+  const raClsModel = CORE.buildModel([dataRow('T', { 0: 'RA11B' })], 3);
+  check('RA11B 셀은 unclassified 아님', !CORE.findConflicts(raClsModel, baseCfg).some((c) => c.type === 'unclassified' && c.subject === 'RA11B'));
+  const occClsModel = CORE.buildModel([dataRow('T', { 0: 'Kor11B', 1: 'RA11B' })], 3);
+  const occClsDelta = CORE.checkMovesDelta(occClsModel, baseCfg, [{ name: 'T', row: 3, fromIdx: 0, toIdx: 1 }]);
+  check('Kor11B → RA11B 슬롯 이동 → block(반 11B 중복)', occClsDelta.blocks.length > 0);
+
+  // (9) assignCandidates: RA11B 슬롯은 ra 로 카운트(수업 아님)
+  const acRaModel = CORE.buildModel([dataRow('교사R', { 0: 'RA11B' })], 3);  // idx5 빈칸
+  const acRa = assignCandidates(acRaModel, { unavailable: [] }, 5).find((c) => c.name === '교사R');
+  check('assignCandidates RA11B → ra≥1 & lessons=0', !!acRa && acRa.ra >= 1 && acRa.lessons === 0);
+
+  // (10) BUG fix: 부분 커버가 학년 간 누수되지 않음 — 11일부+12일부 슬롯에 RA12 배정
+  const xCfg = Object.assign({}, baseCfg, { classless: { 'AP11': ['11일부'], 'AP12': ['12일부'] } });
+  const xModel12 = CORE.buildModel([dataRow('S11', { 0: 'AP11' }), dataRow('S12', { 0: 'AP12' }), dataRow('R', { 0: 'RA12' })], 3);
+  const x12 = gradeFreeState(xModel12, xCfg, 12, { day: 0, period: 1 });
+  const x11 = gradeFreeState(xModel12, xCfg, 11, { day: 0, period: 1 });
+  check('BUG fix: RA12 → 12학년 covered true', x12.kind === 'partial' && x12.covered === true);
+  check('BUG fix: RA12 → 11학년 covered false(누수 없음)', x11.kind === 'partial' && x11.covered === false);
+  const xModelRA = CORE.buildModel([dataRow('S11', { 0: 'AP11' }), dataRow('S12', { 0: 'AP12' }), dataRow('R', { 0: 'RA' })], 3);
+  check('BUG fix: bare RA → 11·12 둘 다 covered false',
+    gradeFreeState(xModelRA, xCfg, 11, { day: 0, period: 1 }).covered === false &&
+    gradeFreeState(xModelRA, xCfg, 12, { day: 0, period: 1 }).covered === false);
+
+  // (11) raFreeCellLabel (순수)
+  check("raFreeCellLabel partial 무감독 → '12일부'", raFreeCellLabel({ kind: 'partial' }, {}, 12) === '12일부');
+  check("raFreeCellLabel partial 1감독 → '12일부\\n교사31'", raFreeCellLabel({ kind: 'partial' }, { gradeSups: ['교사31'] }, 12) === '12일부\n교사31');
+  check("raFreeCellLabel partial 2감독 → '12일부\\n교사31,박OO'", raFreeCellLabel({ kind: 'partial' }, { gradeSups: ['교사31', '박OO'] }, 12) === '12일부\n교사31,박OO');
+  check("raFreeCellLabel some 혼합 → '11B\\n교사31\\n11C'", raFreeCellLabel({ kind: 'some', freeClasses: ['11B', '11C'] }, { byClass: { '11B': ['교사31'] } }, 11) === '11B\n교사31\n11C');
+  check("raFreeCellLabel some 무감독 → '11B, 11C'", raFreeCellLabel({ kind: 'some', freeClasses: ['11B', '11C'] }, {}, 11) === '11B, 11C');
+  check("raFreeCellLabel some 혼합(11B배정·11C미배정) → '11B\\n교사42\\n11C'", raFreeCellLabel({ kind: 'some', freeClasses: ['11B', '11C'] }, { byClass: { '11B': ['교사42'] } }, 11) === '11B\n교사42\n11C');
+  check("raFreeCellLabel all 일부감독 → '12A\\n교사31\\n12B\\n12C'", raFreeCellLabel({ kind: 'all', freeClasses: ['12A', '12B', '12C'] }, { byClass: { '12A': ['교사31'] } }, 12) === '12A\n교사31\n12B\n12C');
+  check("raFreeCellLabel all 무감독 → '전체'", raFreeCellLabel({ kind: 'all', freeClasses: ['12A', '12B', '12C'] }, {}, 12) === '전체');
+
+  // (12) raOpError: 학년 단위 RA12 값(공동감독 허용, 반 지정만 중복 차단)
+  const g12Model = CORE.buildModel([dataRow('T', { 2: 'Kor7A' })], 3);
+  check('raOpError value=RA12 빈 슬롯 → null', raOpError(g12Model, [{ row: 3, idx: 0, value: 'RA12' }], []) === null);
+  const dupG12 = CORE.buildModel([dataRow('A', { 0: 'RA12' }), dataRow('B', {})], 3);
+  check('raOpError RA12 공동감독 중복 허용 → null', raOpError(dupG12, [{ row: 4, idx: 0, value: 'RA12' }], []) === null);
+  const dupG12B = CORE.buildModel([dataRow('A', { 0: 'RA12B' }), dataRow('B', {})], 3);
+  check('raOpError RA12B 중복 → duplicate_ra/409', eq(raOpError(dupG12B, [{ row: 4, idx: 0, value: 'RA12B' }], []), { error: 'duplicate_ra', status: 409 }));
+  const clrG12 = CORE.buildModel([dataRow('T', { 0: 'RA12', 2: 'Kor7A' })], 3);
+  check('raOpError RA12 셀 해제 → null', raOpError(clrG12, [], [{ row: 3, idx: 0 }]) === null);
+
+  // (13) core: RA12(학년 단위)는 미분류 아님 (동기화된 src/core 의존)
+  const ra12Model = CORE.buildModel([dataRow('T', { 0: 'RA12' })], 3);
+  check('RA12 셀은 unclassified 아님', !CORE.findConflicts(ra12Model, baseCfg).some((c) => c.type === 'unclassified' && c.subject === 'RA12'));
+}
+
+/* =========================================================
+   방과후 교시(7·8교시) 이동 차단 (afterSchoolMoveConflicts)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const FRI7 = 38; // 금7 = 4*8 + (7-1)
+
+  // (a) 반 대상 과목(Alge8A → 8학년)을 미등록 금7로 이동 → checkMoves/checkMovesDelta afterSchool block
+  const mA = CORE.buildModel([dataRow('교사A', { 0: 'Alge8A' })], 3);
+  const cfgA = { regularSlots: [] };
+  const moveA = [{ name: '교사A', row: 3, fromIdx: 0, toIdx: FRI7 }];
+  check('(a) checkMoves afterSchool block',
+    CORE.checkMoves(mA, cfgA, moveA).some((c) => c.type === 'afterSchool' && c.severity === 'block'));
+  check('(a) checkMovesDelta afterSchool block',
+    CORE.checkMovesDelta(mA, cfgA, moveA).blocks.some((c) => c.type === 'afterSchool' && c.slot === FRI7));
+
+  // (b) {grade:8, day:4, period:7} 등록 후 동일 이동 → afterSchool 없음
+  const cfgB = { regularSlots: [{ grade: 8, day: 4, period: 7 }] };
+  check('(b) 등록 후 checkMoves afterSchool 없음',
+    !CORE.checkMoves(mA, cfgB, moveA).some((c) => c.type === 'afterSchool'));
+  check('(b) 등록 후 델타 afterSchool 없음',
+    CORE.checkMovesDelta(mA, cfgB, moveA).blocks.every((c) => c.type !== 'afterSchool'));
+
+  // (c) 두 학년(10,11) 대상 무반 과목: 한 학년만 등록 → block, 둘 다 등록 → 허용
+  const mC = CORE.buildModel([dataRow('교사C', { 0: 'MultiElec' })], 3);
+  const moveC = [{ name: '교사C', row: 3, fromIdx: 0, toIdx: FRI7 }];
+  const cfgC1 = { classless: { 'MultiElec': ['10A', '11A'] }, regularSlots: [{ grade: 10, day: 4, period: 7 }] };
+  check('(c) 10만 등록 → 11학년 block',
+    CORE.checkMoves(mC, cfgC1, moveC).some((c) => c.type === 'afterSchool' && c.severity === 'block' && c.grades.indexOf(11) !== -1));
+  const cfgC2 = { classless: { 'MultiElec': ['10A', '11A'] }, regularSlots: [{ grade: 10, day: 4, period: 7 }, { grade: 11, day: 4, period: 7 }] };
+  check('(c) 10·11 모두 등록 → 허용',
+    !CORE.checkMoves(mC, cfgC2, moveC).some((c) => c.type === 'afterSchool'));
+
+  // (d) 미분류 과목(매핑 없음·파싱 불가) 7·8교시 이동 → afterSchool block 없음
+  const mD = CORE.buildModel([dataRow('교사D', { 0: 'Drawing' })], 3);
+  check('(d) 미분류 과목 afterSchool 없음',
+    !CORE.checkMoves(mD, { regularSlots: [] }, [{ name: '교사D', row: 3, fromIdx: 0, toIdx: FRI7 }]).some((c) => c.type === 'afterSchool'));
+
+  // (e) 델타: 원래 7·8교시에 있던 과목을 다른(비방과후) 슬롯으로 이동 → 신규 afterSchool 없음
+  const mE = CORE.buildModel([dataRow('교사E', { 38: 'Alge8A' })], 3);
+  const moveE = [{ name: '교사E', row: 3, fromIdx: 38, toIdx: 0 }];
+  check('(e) 7·8교시 이탈 이동 → 신규 afterSchool 없음',
+    CORE.checkMovesDelta(mE, { regularSlots: [] }, moveE).blocks.every((c) => c.type !== 'afterSchool'));
+  check('(e) checkMoves 도 afterSchool 없음',
+    !CORE.checkMoves(mE, { regularSlots: [] }, moveE).some((c) => c.type === 'afterSchool'));
+}
+
+/* =========================================================
+   assembleConfig(index.html) — 설정 저장 시 regularSlots 보존
+   ========================================================= */
+{
+  // index.html 안의 assembleConfig 소스를 중괄호 매칭으로 추출 → new Function 으로 로드
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const start = html.indexOf('function assembleConfig()');
+  let depth = 0, end = -1;
+  for (let i = html.indexOf('{', start); i < html.length; i++) {
+    if (html[i] === '{') depth++;
+    else if (html[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+  }
+  const src = html.slice(start, end);
+  const runAssemble = new Function('DRAFT', 'STATE', src + '\nreturn assembleConfig();');
+
+  const DRAFT = { fixedBlocks: [], groups: [], classless: {}, team: [], unavailable: [], pinned: [] };
+  const regular = [{ grade: 8, day: 4, period: 7 }, { grade: 11, day: 2, period: 8 }];
+  const STATE = { config: { regularSlots: regular } };
+  const out = runAssemble(DRAFT, STATE);
+  check('assembleConfig regularSlots 이월', eq(out.regularSlots, regular));
+  out.regularSlots && out.regularSlots[0] && (out.regularSlots[0].grade = 99);
+  check('assembleConfig regularSlots 딥카피(원본 불변)', STATE.config.regularSlots[0].grade === 8);
+
+  // regularSlots 가 없으면 필드도 생기지 않아야 함(다른 이월 필드와 동일 규약)
+  const out2 = runAssemble(DRAFT, { config: {} });
+  check('assembleConfig regularSlots 없으면 미설정', out2.regularSlots === undefined);
+}
+
+/* =========================================================
+   사용자 OAuth 토큰 전달 (makeSheetsFetch) + Sheets 오류 매핑 (mapSheetsError)
+   ========================================================= */
+await (async function () {
+  // (1) 요청 헤더에 사용자 access token 이 그대로 실린다 (SA 토큰 없음)
+  let seen = null;
+  const fakeFetch = async function (url, opts) {
+    seen = { url: url, opts: opts };
+    return { ok: true, status: 200, json: async function () { return { values: [] }; } };
+  };
+  const sf = makeSheetsFetch('ya29.USER_TOKEN', 'SHEET/ID', fakeFetch);
+  const out = await sf('/values:batchGet?ranges=A1', { method: 'GET' });
+  check('makeSheetsFetch → 사용자 토큰을 Authorization 으로 전달',
+    seen.opts.headers.authorization === 'Bearer ya29.USER_TOKEN');
+  check('makeSheetsFetch → sheetId 는 URL 인코딩',
+    seen.url === 'https://sheets.googleapis.com/v4/spreadsheets/SHEET%2FID/values:batchGet?ranges=A1');
+  check('makeSheetsFetch → method 등 init 보존', seen.opts.method === 'GET');
+  check('makeSheetsFetch → res.json() 반환', eq(out, { values: [] }));
+
+  // (2) 비정상 응답은 상태코드를 담아 throw
+  const errFetch = function (status) {
+    return async function () {
+      return { ok: false, status: status, text: async function () { return 'boom'; }, json: async function () { return {}; } };
+    };
+  };
+  await expectFail('403 응답 → sheets_api_error throw',
+    makeSheetsFetch('t', 'S', errFetch(403))('/x'), 'sheets_api_error 403 boom');
+
+  // (3) 상태코드 추출
+  check('sheetsErrorStatus 401 추출', sheetsErrorStatus(new Error('sheets_api_error 401 x')) === 401);
+  check('sheetsErrorStatus 비-Sheets 오류 → null', sheetsErrorStatus(new Error('boom')) === null);
+
+  // ---- 오류 매핑: 구글이 실제로 돌려주는 응답 본문 fixture 로 검증 ----
+  // makeSheetsFetch 가 만드는 메시지 형태 그대로 재현한다.
+  const apiErr = function (status, bodyObj) {
+    const body = typeof bodyObj === 'string' ? bodyObj : JSON.stringify(bodyObj);
+    return new Error('sheets_api_error ' + status + ' ' + body.slice(0, 1200));
+  };
+
+  // 실제 구글 응답: 토큰에 spreadsheets 스코프가 없을 때
+  const SCOPE_403 = {
+    error: {
+      code: 403,
+      message: 'Request had insufficient authentication scopes.',
+      errors: [{ message: 'Insufficient Permission', domain: 'global', reason: 'insufficientPermissions' }],
+      status: 'PERMISSION_DENIED',
+      details: [{
+        '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+        reason: 'ACCESS_TOKEN_SCOPE_INSUFFICIENT',
+        domain: 'googleapis.com',
+        metadata: { service: 'sheets.googleapis.com', method: 'google.apps.sheets.v4.SpreadsheetsService.GetSpreadsheet' }
+      }]
+    }
+  };
+  // 실제 구글 응답: 시트에 공유 권한이 없을 때
+  const NOPERM_403 = {
+    error: {
+      code: 403,
+      message: 'The caller does not have permission',
+      errors: [{ message: 'The caller does not have permission', domain: 'global', reason: 'forbidden' }],
+      status: 'PERMISSION_DENIED'
+    }
+  };
+  // 실제 구글 응답: 삭제되었거나 없는 시트 ID
+  const NOTFOUND_404 = {
+    error: {
+      code: 404,
+      message: 'Requested entity was not found.',
+      errors: [{ message: 'Requested entity was not found.', domain: 'global', reason: 'notFound' }],
+      status: 'NOT_FOUND'
+    }
+  };
+  const RATE_429 = {
+    error: {
+      code: 429,
+      message: "Quota exceeded for quota metric 'Read requests'",
+      errors: [{ message: 'Quota exceeded', domain: 'usageLimits', reason: 'rateLimitExceeded' }],
+      status: 'RESOURCE_EXHAUSTED'
+    }
+  };
+
+  // (4) 401 은 토큰 만료(클라이언트가 명시적 재허용 후 재시도할 신호)
+  const m401 = mapSheetsError(apiErr(401, { error: { code: 401, message: 'Request had invalid authentication credentials.', status: 'UNAUTHENTICATED' } }));
+  check('401 → 401 sheets_token_expired',
+    m401.status === 401 && m401.body.error === 'sheets_token_expired');
+
+  // (5) 403 은 본문으로 스코프 부족 / 권한 없음을 구분한다
+  const mScope = mapSheetsError(apiErr(403, SCOPE_403));
+  check('스코프 부족 403 → insufficient_scope',
+    mScope.status === 403 && mScope.body.error === 'insufficient_scope');
+  check('insufficient_scope 안내는 재허용 유도(공유 요청 아님)',
+    /권한/.test(mScope.body.reasons[0]) && !/공유를 요청/.test(mScope.body.reasons[0]));
+
+  const m403 = mapSheetsError(apiErr(403, NOPERM_403));
+  check('권한 없음 403 → no_access', m403.status === 403 && m403.body.error === 'no_access');
+  check('no_access 안내는 시트 공유 요청 문구', /공유를 요청/.test(m403.body.reasons[0]));
+  check('no_access 안내에 서비스 계정 언급 없음', !/서비스 계정/.test(m403.body.reasons[0]));
+
+  // details 가 본문 뒤쪽에 있어도(길어도) 스코프 부족을 놓치지 않는다
+  const padded = JSON.parse(JSON.stringify(SCOPE_403));
+  padded.error.details.unshift({ '@type': 'type.googleapis.com/google.rpc.Help', links: [{ description: 'x'.repeat(400), url: 'https://developers.google.com/' + 'y'.repeat(200) }] });
+  check('긴 본문에서도 스코프 부족 판별',
+    mapSheetsError(apiErr(403, padded)).body.error === 'insufficient_scope');
+
+  // errors[].reason 만 있는(details 없는) 구형 응답도 잡는다
+  const legacyScope = { error: { code: 403, message: 'Insufficient Permission', errors: [{ message: 'Insufficient Permission', domain: 'global', reason: 'insufficientPermissions' }] } };
+  check('insufficientPermissions 만 있어도 스코프 부족',
+    mapSheetsError(apiErr(403, legacyScope)).body.error === 'insufficient_scope');
+
+  // (6) 404 는 no_access 가 아니라 not_found — 존재하지 않는 시트에 공유 요청을 보내게 하지 않는다
+  const m404 = mapSheetsError(apiErr(404, NOTFOUND_404));
+  check('404 → 404 not_found', m404.status === 404 && m404.body.error === 'not_found');
+  check('not_found 안내는 주소 확인 유도', /주소|찾을 수 없/.test(m404.body.reasons[0]));
+  check('not_found 안내에 공유 요청 문구 없음', !/공유를 요청/.test(m404.body.reasons[0]));
+
+  // (7) 방어적 파싱 — 본문 없음/깨진 본문/비 JSON 에서도 throw 하지 않고 no_access 로 폴백
+  check('본문 없는 403 → no_access', mapSheetsError(new Error('sheets_api_error 403 ')).body.error === 'no_access');
+  check('본문 완전 부재 403 → no_access', mapSheetsError(new Error('sheets_api_error 403')).body.error === 'no_access');
+  check('깨진 JSON 403 → no_access', mapSheetsError(apiErr(403, '{"error":{"code":403,')).body.error === 'no_access');
+  check('HTML 본문 403 → no_access', mapSheetsError(apiErr(403, '<html><body>403 Forbidden</body></html>')).body.error === 'no_access');
+  // 잘려서 JSON.parse 가 실패해도 표식이 남아 있으면 스코프 부족으로 인식
+  check('잘린 본문이라도 표식 있으면 insufficient_scope',
+    mapSheetsError(apiErr(403, '{"error":{"code":403,"errors":[{"reason":"insufficientPermissions"')).body.error === 'insufficient_scope');
+
+  // (8) 429 는 그대로 상태코드 유지, 원본 메시지 미노출
+  const m429 = mapSheetsError(apiErr(429, RATE_429));
+  check('429 → 429 sheets_error', m429.status === 429 && m429.body.error === 'sheets_error');
+  check('429 응답에 구글 원문 미노출', !/Quota exceeded/.test(JSON.stringify(m429.body)));
+
+  // (9) 그 외는 원본 메시지 미노출
+  const m500 = mapSheetsError(new Error('sheets_api_error 500 internal detail'));
+  check('500 → sheets_error', m500.status === 500 && m500.body.error === 'sheets_error');
+  check('sheets_error 는 원본 메시지 미노출', !/internal detail/.test(JSON.stringify(m500.body)));
+  const mUnknown = mapSheetsError(new Error('random failure'));
+  check('비-Sheets 오류 → 500 sheets_error', mUnknown.status === 500 && mUnknown.body.error === 'sheets_error');
+  check('null 오류에도 throw 하지 않음', mapSheetsError(null).body.error === 'sheets_error');
+
+  // (10) makeSheetsFetch 는 스코프 판별에 필요한 본문을 충분히 남긴다
+  const scopeBody = JSON.stringify(SCOPE_403);
+  const bigErrFetch = async function () {
+    return { ok: false, status: 403, text: async function () { return scopeBody; }, json: async function () { return {}; } };
+  };
+  let thrown = null;
+  try { await makeSheetsFetch('t', 'S', bigErrFetch)('/x'); } catch (e) { thrown = e; }
+  check('makeSheetsFetch 403 본문 보존 → insufficient_scope 판별 가능',
+    !!thrown && mapSheetsError(thrown).body.error === 'insufficient_scope');
+})();
+
+/* =========================================================
+   클라이언트 토큰 계층(index.html @token-layer)
+   — GIS 토큰 클라이언트만 가짜로 주입하고 requestSheetsToken/awaitSheetsAccess/apiCall 은
+     실제 코드를 그대로 실행한다(스텁으로 대체하지 않는다).
+   ========================================================= */
+await (async function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const start = html.indexOf('/* @token-layer-start');
+  const endMark = html.indexOf('/* @token-layer-end */', start);
+  check('index.html 에서 @token-layer 구간 추출', start > 0 && endMark > start);
+  const src = html.slice(start, endMark);
+
+  const tick = function (n) {
+    let p = Promise.resolve();
+    for (let i = 0; i < (n || 3); i++) p = p.then(function () {});
+    return p;
+  };
+  const sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+  const resp = function (status, body) {
+    return { status: status, ok: status >= 200 && status < 300, json: async function () { return body; } };
+  };
+
+  /* 가짜 GIS 토큰 클라이언트. behavior(client, nthCall) 가 콜백을 어떻게 호출할지 정한다. */
+  const makeClient = function (behavior) {
+    const c = { calls: [], callback: null, error_callback: null };
+    c.requestAccessToken = function (o) {
+      c.calls.push(o || {});
+      behavior(c, c.calls.length);
+    };
+    return c;
+  };
+  /* n 번째 호출마다 access_token 을 주는 기본 동작(비동기 — 실제 팝업처럼) */
+  const grants = function (prefix) {
+    return function (c, n) { setTimeout(function () { c.callback({ access_token: (prefix || 'NEW') + n }); }, 0); };
+  };
+
+  /* 토큰 계층을 실제로 실행하는 하네스. DOM 은 배너 대역(fake)으로만 대체한다. */
+  const build = function (fetchImpl, client, timeoutMs) {
+    const banner = { shown: [], hidden: 0, grant: null, lastErr: null };
+    const showReauthBanner = function (kind, onGrant) {
+      banner.shown.push(kind);
+      // 실제 배너처럼: 버튼 클릭 시에만 onGrant 가 호출된다.
+      banner.grant = function (promptMode) {
+        return onGrant(promptMode === undefined ? (kind === 'consent' ? 'consent' : '') : promptMode)
+          .catch(function (e) { banner.lastErr = e; throw e; });
+      };
+    };
+    const hideReauthBanner = function () { banner.hidden++; };
+    const api = new Function(
+      'DEV_MODE', 'getToken', 'fetch', 'tokenClient', 'showReauthBanner', 'hideReauthBanner', 'timeoutMs',
+      'var sheetsToken = "OLD";' + src +
+      '\nif (timeoutMs) SHEETS_TOKEN_TIMEOUT_MS = timeoutMs;' +
+      '\nreturn { apiCall: apiCall, apiFetch: apiFetch, requestSheetsToken: requestSheetsToken,' +
+      '  gen: function () { return sheetsTokenGen; }, token: function () { return sheetsToken; },' +
+      '  pending: function () { return !!tokenPending; } };'
+    )(false, function () { return 'ID_TOKEN'; }, fetchImpl, client, showReauthBanner, hideReauthBanner, timeoutMs);
+    api.banner = banner;
+    api.client = client;
+    return api;
+  };
+
+  // (1) 정상 요청: 두 헤더가 모두 실린다
+  let calls = [];
+  let h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(200, { ok: true }); },
+    makeClient(grants()));
+  let r = await h.apiCall('/api/state');
+  check('apiCall → Authorization 에 ID 토큰', calls[0].opts.headers['Authorization'] === 'Bearer ID_TOKEN');
+  check('apiCall → X-Sheets-Token 에 access 토큰', calls[0].opts.headers['X-Sheets-Token'] === 'OLD');
+  check('apiCall 정상 응답 통과', r.status === 200 && r.data.ok === true);
+  check('정상 응답에서는 팝업 없음', h.client.calls.length === 0 && h.banner.shown.length === 0);
+
+  // (2) 401 sheets_token_expired → 자동 재발급 금지. 배너만 뜨고 팝업은 클릭 전까지 열리지 않는다.
+  calls = [];
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'sheets_token_expired' }) : resp(200, { ok: true });
+  }, makeClient(grants()));
+  let p1 = h.apiCall('/api/state');
+  await tick(5);
+  check('만료 → 재허용 배너 노출', h.banner.shown.length === 1 && h.banner.shown[0] === 'expired');
+  check('만료 → 클릭 전에는 requestAccessToken 호출 없음', h.client.calls.length === 0);
+  check('만료 → 클릭 전에는 재시도도 없음', calls.length === 1);
+  await h.banner.grant();          // 사용자가 [다시 허용] 클릭
+  r = await p1;
+  check('클릭 후 → requestAccessToken 1회', h.client.calls.length === 1);
+  check('클릭 후 → 원래 요청을 그대로 1회 재시도', calls.length === 2 && calls[1].path === '/api/state');
+  check('재시도는 갱신된 토큰 사용', calls[1].opts.headers['X-Sheets-Token'] === 'NEW1');
+  check('재시도 성공 시 정상 응답 반환', r.status === 200 && r.data.ok === true);
+  check('성공 후 배너 숨김', h.banner.hidden >= 1);
+  check('만료 경로는 prompt 빈 문자열(재동의 화면 생략)', h.client.calls[0].prompt === '');
+
+  // (3) POST 재시도 시 method/body/헤더가 보존된다
+  calls = [];
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'sheets_token_expired' }) : resp(200, { ok: true });
+  }, makeClient(grants()));
+  const bodyStr = JSON.stringify({ moves: [{ row: 3, from: 1, to: 2 }], version: 'v1' });
+  p1 = h.apiCall('/api/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: bodyStr });
+  await tick(5);
+  await h.banner.grant();
+  r = await p1;
+  check('POST 재시도 → method 보존', calls[1].opts.method === 'POST');
+  check('POST 재시도 → body 원문 보존', calls[1].opts.body === bodyStr);
+  check('POST 재시도 → 호출자 헤더 보존', calls[1].opts.headers['content-type'] === 'application/json');
+  check('POST 재시도 → 경로 보존', calls[1].path === '/api/apply');
+  check('POST 재시도 → 새 토큰 사용', calls[1].opts.headers['X-Sheets-Token'] === 'NEW1');
+
+  // (4) 동시 401 두 건 → 배너 1회, 재발급 1회, 각자 재시도
+  calls = [];
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return o.headers['X-Sheets-Token'] === 'OLD' ? resp(401, { ok: false, error: 'sheets_token_expired' }) : resp(200, { ok: true });
+  }, makeClient(grants()));
+  const both = Promise.all([h.apiCall('/api/state'), h.apiCall('/api/sheets')]);
+  await tick(5);
+  check('동시 401 → 배너 1회만', h.banner.shown.length === 1);
+  await h.banner.grant();
+  const rs = await both;
+  check('동시 401 → 재발급(팝업) 1회만', h.client.calls.length === 1);
+  check('동시 401 → 두 요청 모두 재시도 성공', rs[0].status === 200 && rs[1].status === 200);
+  check('동시 401 → 총 4회 호출(각 2회)', calls.length === 4);
+
+  // (5) 늦게 도착한 401 → 세대 카운터로 판별해 중복 팝업 없이 즉시 재시도
+  calls = [];
+  let releaseFirst = null;
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    if (calls.length === 1) return new Promise(function (res) { releaseFirst = res; });
+    return resp(200, { ok: true });
+  }, makeClient(grants()));
+  p1 = h.apiCall('/api/state');           // gen 0 에서 전송, 응답은 보류
+  await tick(5);
+  await h.requestSheetsToken('');         // 다른 경로에서 토큰 갱신 → gen 1
+  check('별도 갱신으로 세대 증가', h.gen() === 1);
+  releaseFirst(resp(401, { ok: false, error: 'sheets_token_expired' }));   // 늦은 401 도착
+  r = await p1;
+  check('늦은 401 → 추가 팝업 없음', h.client.calls.length === 1);
+  check('늦은 401 → 배너 없음', h.banner.shown.length === 0);
+  check('늦은 401 → 새 토큰으로 즉시 재시도', calls.length === 2 && calls[1].opts.headers['X-Sheets-Token'] === 'NEW1');
+  check('늦은 401 → 재시도 결과 반환', r.status === 200);
+
+  // (6) GIS 가 콜백을 영영 부르지 않아도 타임아웃으로 빠져나온다(영구 pending 없음)
+  const deadClient = makeClient(function () { /* 콜백도 error_callback 도 오지 않음 */ });
+  h = build(async function () { return resp(200, { ok: true }); }, deadClient, 25);
+  let caught = null;
+  try { await h.requestSheetsToken(''); } catch (e) { caught = e; }
+  check('GIS 무응답 → 타임아웃으로 reject', !!caught && /sheets_token_timeout/.test(caught.message));
+  check('타임아웃 후 tokenPending 해제', h.pending() === false);
+  // 죽은 promise 를 재사용하지 않고 새 요청이 실제로 나간다
+  deadClient.requestAccessToken = function (o) {
+    deadClient.calls.push(o);
+    setTimeout(function () { deadClient.callback({ access_token: 'AFTER_TIMEOUT' }); }, 0);
+  };
+  const t2 = await h.requestSheetsToken('');
+  check('타임아웃 후 재시도 가능(죽은 promise 재사용 안 함)', t2 === 'AFTER_TIMEOUT' && h.token() === 'AFTER_TIMEOUT');
+  check('타임아웃 후 재시도로 세대 증가', h.gen() === 1);
+
+  // (7) 팝업 닫힘(popup_closed) → 복구 가능: 배너 유지, 재클릭으로 성공하면 원 요청 재개
+  calls = [];
+  let attempt = 0;
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'sheets_token_expired' }) : resp(200, { ok: true });
+  }, makeClient(function (c, n) {
+    attempt = n;
+    setTimeout(function () {
+      if (n === 1) c.error_callback({ type: 'popup_closed' });
+      else c.callback({ access_token: 'NEW_AFTER_CLOSE' });
+    }, 0);
+  }));
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  caught = null;
+  try { await h.banner.grant(); } catch (e) { caught = e; }
+  check('popup_closed → 클릭 결과가 오류로 전달(배너가 안내 갱신 가능)',
+    !!caught && /popup_closed/.test(caught.message));
+  check('popup_closed → 원 요청은 아직 실패 처리되지 않음(재시도 여지 유지)', calls.length === 1);
+  await h.banner.grant();          // 사용자가 다시 클릭
+  r = await p1;
+  check('재클릭 성공 → 원래 요청 재개', calls.length === 2 && r.status === 200);
+  check('재클릭 성공 → 새 토큰 사용', calls[1].opts.headers['X-Sheets-Token'] === 'NEW_AFTER_CLOSE' && attempt === 2);
+
+  // (8) 사용자가 동의를 거부(access_denied)해도 배너가 남아 복구 가능
+  h = build(async function () { return resp(401, { ok: false, error: 'sheets_token_expired' }); },
+    makeClient(function (c) { setTimeout(function () { c.callback({ error: 'access_denied' }); }, 0); }));
+  p1 = h.apiCall('/api/state');
+  p1.catch(function () {});
+  await tick(5);
+  caught = null;
+  try { await h.banner.grant(); } catch (e) { caught = e; }
+  check('access_denied → 클릭 결과가 오류로 전달', !!caught && /access_denied/.test(caught.message));
+  check('access_denied → 배너는 숨겨지지 않음(흰 화면 없음)', h.banner.hidden === 0);
+  check('access_denied → 다시 클릭할 수 있는 상태', typeof h.banner.grant === 'function');
+
+  // (9) insufficient_scope(403) → prompt:'consent' 로 재동의를 요구한다
+  calls = [];
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1
+      ? resp(403, { ok: false, error: 'insufficient_scope', reasons: ['스코프 부족'] })
+      : resp(200, { ok: true });
+  }, makeClient(grants('SCOPED')));
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  check('insufficient_scope → consent 배너', h.banner.shown[0] === 'consent');
+  await h.banner.grant();
+  r = await p1;
+  check('insufficient_scope → prompt:consent 로 요청', h.client.calls[0].prompt === 'consent');
+  check('insufficient_scope → 재동의 후 재시도 성공', calls.length === 2 && r.status === 200);
+
+  // (10) 재허용 후에도 같은 401 → 로그인 화면으로 튕기지 않는 sheetsAccess 오류(작업 상태 보존)
+  calls = [];
+  h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(401, { ok: false, error: 'sheets_token_expired' }); },
+    makeClient(grants()));
+  p1 = h.apiCall('/api/state');
+  caught = null;
+  p1 = p1.catch(function (e) { caught = e; });
+  await tick(5);
+  await h.banner.grant();
+  await p1;
+  check('재허용 후에도 401 → sheetsAccess 오류', !!caught && caught.sheetsAccess === true);
+  check('재허용 후에도 401 → auth 오류 아님(로그인 화면으로 안 튕김)', caught.auth !== true);
+  check('재시도는 1회뿐(총 2회 호출)', calls.length === 2);
+
+  // (11) missing_sheets_token 도 같은 재허용 경로
+  calls = [];
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'missing_sheets_token' }) : resp(200, { ok: true });
+  }, makeClient(grants()));
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  await h.banner.grant();
+  r = await p1;
+  check('missing_sheets_token → 재허용 후 재시도 성공', calls.length === 2 && r.status === 200);
+
+  // (12) ID 토큰 문제(401 invalid_token)는 팝업/배너 없이 즉시 로그인 만료 처리
+  calls = [];
+  h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(401, { ok: false, error: 'invalid_token' }); },
+    makeClient(grants()));
+  caught = null;
+  try { await h.apiCall('/api/state'); } catch (e) { caught = e; }
+  check('invalid_token → 재시도/팝업 없음', calls.length === 1 && h.client.calls.length === 0 && h.banner.shown.length === 0);
+  check('invalid_token → auth 401', !!caught && caught.auth === true && caught.status === 401);
+
+  // (13) no_access(403) / not_found(404) 는 throw 하지 않고 본문을 그대로 넘긴다
+  h = build(async function () { return resp(403, { ok: false, error: 'no_access', reasons: ['권한 없음'] }); }, makeClient(grants()));
+  r = await h.apiCall('/api/state');
+  check('no_access(403) 는 본문 그대로 전달', r.status === 403 && r.data.error === 'no_access');
+  check('no_access 에서는 팝업/배너 없음', h.client.calls.length === 0 && h.banner.shown.length === 0);
+
+  h = build(async function () { return resp(404, { ok: false, error: 'not_found', reasons: ['없음'] }); }, makeClient(grants()));
+  r = await h.apiCall('/api/state');
+  check('not_found(404) 는 본문 그대로 전달', r.status === 404 && r.data.error === 'not_found');
+
+  // (14) 그 외 403(도메인)은 auth 오류
+  h = build(async function () { return resp(403, { ok: false, error: 'domain_not_allowed' }); }, makeClient(grants()));
+  caught = null;
+  try { await h.apiCall('/api/state'); } catch (e) { caught = e; }
+  check('domain_not_allowed(403) → auth 403', !!caught && caught.auth === true && caught.status === 403);
+
+  // (15) tokenClient 가 없으면(스크립트 로드 실패) 즉시 reject — 영구 pending 금지
+  h = build(async function () { return resp(200, { ok: true }); }, null, 25);
+  caught = null;
+  try { await h.requestSheetsToken(''); } catch (e) { caught = e; }
+  check('tokenClient 없음 → 즉시 reject', !!caught && /token_client_unavailable/.test(caught.message));
+  check('tokenClient 없음 → pending 잔류 없음', h.pending() === false);
+
+  // (16) requestAccessToken 이 동기 throw 해도 reject 되고 pending 이 남지 않는다
+  const throwClient = makeClient(function () { throw new Error('popup_failed_to_open'); });
+  h = build(async function () { return resp(200, { ok: true }); }, throwClient, 25);
+  caught = null;
+  try { await h.requestSheetsToken(''); } catch (e) { caught = e; }
+  check('requestAccessToken 동기 throw → reject', !!caught && /popup_failed_to_open/.test(caught.message));
+  check('동기 throw 후 pending 잔류 없음', h.pending() === false);
+})();
+
+
+/* =========================================================
+   22. 데이터 파괴 방지 — D1 설정 조회 실패 / D2 쓰기 탭 폴백 / D4 clear→write 비원자성
+   ========================================================= */
+await (async function () {
+  const CFG_TAB = '설정';
+  const listWithConfig = [{ title: 'revised' }, { title: CFG_TAB }];
+  const listWithoutConfig = [{ title: 'revised' }];
+  const rawConfig = [['[고정블록]'], ['슬롯', '라벨', '적용학년'], ['월3', 'Counseling', '전체']];
+
+  /* ---- D1: 일시적 조회 오류가 "설정 탭 없음"으로 둔갑하면 안 된다 ---- */
+
+  // (1) 설정 탭이 실제로 없음 → 조회 시도조차 하지 않고 빈 config + 빈 해시(정상 저장 가능)
+  let getCalls = 0;
+  const absent = await readConfigWithVersion({
+    batchGet: async function () { getCalls++; throw new Error('호출되면 안 됨'); },
+    parseConfig: parseConfig, hashValues: hashValues
+  }, listWithoutConfig, CFG_TAB);
+  check('D1 설정 탭 부재 → batchGet 미호출', getCalls === 0);
+  check('D1 설정 탭 부재 → unavailable false', absent.unavailable === false);
+  check('D1 설정 탭 부재 → version === hashValues([])', absent.version === hashValues([]));
+  check('D1 설정 탭 부재 → config.missing true', absent.config.missing === true);
+
+  // (2) 설정 탭은 있는데 조회가 실패(429/503/네트워크) → 빈 config로 위장하지 않는다
+  let logged = null;
+  const failed = await readConfigWithVersion({
+    batchGet: async function () { throw new Error('sheets_api_error 429 rate limit exceeded'); },
+    parseConfig: parseConfig, hashValues: hashValues,
+    onError: function (e) { logged = e; }
+  }, listWithConfig, CFG_TAB);
+  check('D1 조회 실패 → unavailable true', failed.unavailable === true);
+  check('D1 조회 실패 → version null (빈 해시 위장 없음)', failed.version === null);
+  check('D1 조회 실패 → raw null', failed.raw === null);
+  check('D1 조회 실패 → onError로 원인 전달(로깅 가능)',
+    logged !== null && /429/.test(String(logged.message)));
+
+  // (3) 회귀 핵심: 조회 실패 버전이 "빈 해시"와 같으면 낙관적 락이 무력화된다
+  check('D1 조회 실패 version !== hashValues([]) (낙관적 락 무력화 방지)',
+    failed.version !== hashValues([]));
+  check('D1 조회 실패 version !== 실제 설정 해시', failed.version !== hashValues(rawConfig));
+
+  // (4) 정상 조회 → 실제 값 기준 해시 + raw 보존(D4의 prevRowCount 계산에 사용)
+  const okCfg = await readConfigWithVersion({
+    batchGet: async function (ranges) {
+      check('D1 정상 조회 범위는 A:C', eq(ranges, ["'" + CFG_TAB + "'!A:C"]));
+      return [rawConfig];
+    },
+    parseConfig: parseConfig, hashValues: hashValues
+  }, listWithConfig, CFG_TAB);
+  check('D1 정상 조회 → unavailable false', okCfg.unavailable === false);
+  check('D1 정상 조회 → version === hashValues(raw)', okCfg.version === hashValues(rawConfig));
+  check('D1 정상 조회 → raw 행 수 보존', okCfg.raw.length === 3);
+  check('D1 정상 조회 → fixedBlocks 파싱', okCfg.config.fixedBlocks.length === 1);
+
+  // (5) 실제 파괴 경로 재현: /api/state 조회 실패 → 클라이언트가 그때 받은 버전으로 저장 →
+  //     서버 재조회도 실패. 옛 코드는 양쪽 모두 hashValues([]) 라 락을 통과해 설정을 전멸시켰다.
+  //     handleConfig 의 가드 순서(unavailable 먼저)를 그대로 흉내 낸다.
+  async function saveGuard(batchGet, sheetsList, baseConfigVersion) {
+    const cur = await readConfigWithVersion(
+      { batchGet: batchGet, parseConfig: parseConfig, hashValues: hashValues }, sheetsList, CFG_TAB);
+    if (cur.unavailable) return { status: 503, error: 'config_unavailable' };
+    if (baseConfigVersion !== cur.version) return { status: 409, error: 'stale_config' };
+    return { status: 200, error: null, prevRowCount: (cur.raw || []).length };
+  }
+  const flaky = async function () { throw new Error('sheets_api_error 503 backend error'); };
+  // 클라이언트가 조회 실패 때 받은 값(null)을 그대로 보내도 저장은 거부되어야 한다
+  check('D1 조회 실패 상태 + baseVersion null → 503 config_unavailable',
+    eq(await saveGuard(flaky, listWithConfig, null), { status: 503, error: 'config_unavailable' }));
+  // 옛 버그 값(빈 해시)을 보내도 마찬가지
+  check('D1 조회 실패 상태 + baseVersion 빈해시 → 503 (설정 전멸 경로 차단)',
+    eq(await saveGuard(flaky, listWithConfig, hashValues([])), { status: 503, error: 'config_unavailable' }));
+  // 설정 탭이 진짜 없을 때는 빈 해시로 정상 저장(최초 생성) 가능해야 한다 — 과잉 차단 방지
+  check('D1 설정 탭 부재 + baseVersion 빈해시 → 저장 허용(최초 생성)',
+    (await saveGuard(flaky, listWithoutConfig, hashValues([]))).status === 200);
+  // 정상 조회 시 낙관적 락은 그대로 동작
+  const okGet2 = async function () { return [rawConfig]; };
+  check('D1 정상 + 최신 버전 → 저장 허용(prevRowCount 전달)',
+    eq(await saveGuard(okGet2, listWithConfig, hashValues(rawConfig)), { status: 200, error: null, prevRowCount: 3 }));
+  check('D1 정상 + 낡은 버전 → 409 stale_config',
+    (await saveGuard(okGet2, listWithConfig, 'stale')).status === 409);
+
+  /* ---- D2: 쓰기 경로는 없는 탭을 다른 탭으로 폴백하지 않는다 ---- */
+  const tabs = [{ title: 'revised' }, { title: 'revised (사본1)' }];
+  check('D2 존재하는 탭 → 그대로 사용',
+    eq(resolveApplyTab(tabs, 'revised (사본1)'), { tab: 'revised (사본1)' }));
+  check('D2 없는 탭(삭제·개명) → tab_not_found (revised 폴백 금지)',
+    eq(resolveApplyTab(tabs, 'revised (사본2)'), { error: 'tab_not_found' }));
+  check('D2 탭 미지정 → 자동 선택 위임(null)', eq(resolveApplyTab(tabs, ''), { tab: null }));
+  check('D2 탭 undefined → 자동 선택 위임(null)', eq(resolveApplyTab(tabs, undefined), { tab: null }));
+  check('D2 빈 시트목록 + 탭 지정 → tab_not_found',
+    eq(resolveApplyTab([], 'revised'), { error: 'tab_not_found' }));
+
+  /* ---- D4: clear 없는 범위 지정 덮어쓰기 ---- */
+  function recordingFetch() {
+    const calls = [];
+    const sf = async function (path, init) {
+      calls.push({ path: path, body: init && init.body ? JSON.parse(init.body) : null });
+      return {};
+    };
+    sf.calls = calls;
+    return sf;
+  }
+
+  // (1) 이전 내용이 더 길 때 → 잔여 행이 빈 값으로 덮여 지워진다
+  const sf1 = recordingFetch();
+  await overwriteSheetRange(sf1, CFG_TAB, [['[고정블록]'], ['월3', 'X', '전체']], 3, 5);
+  check('D4 clear 호출 없음', sf1.calls.every(function (c) { return !/:clear/.test(c.path); }));
+  check('D4 단일 요청으로 완료(비원자 구간 없음)', sf1.calls.length === 1);
+  const d1 = sf1.calls[0].body.data[0];
+  check('D4 범위는 A1:C5 (이전 행 수까지 포함)', d1.range === "'" + CFG_TAB + "'!A1:C5");
+  check('D4 잔여 행 3개가 빈 값으로 채워짐',
+    d1.values.length === 5 && eq(d1.values.slice(2), [['', '', ''], ['', '', ''], ['', '', '']]));
+  check('D4 짧은 행은 C열까지 빈 값 패딩', eq(d1.values[0], ['[고정블록]', '', '']));
+
+  // (2) D열은 범위에 포함되지 않는다 → 메모·보조 데이터 보존
+  check('D4 범위에 D열 이후 미포함', !/![A-Z]*1:[D-Z]/.test(d1.range));
+
+  // (3) 새 내용이 더 길 때 → 새 길이만큼만
+  const sf2 = recordingFetch();
+  await overwriteSheetRange(sf2, CFG_TAB, [['a'], ['b'], ['c']], 3, 1);
+  check('D4 새 내용이 더 길면 새 길이 사용', sf2.calls[0].body.data[0].range === "'" + CFG_TAB + "'!A1:C3");
+
+  // (4) 쓸 것도 지울 것도 없으면 요청 자체를 보내지 않는다
+  const sf3 = recordingFetch();
+  const res3 = await overwriteSheetRange(sf3, CFG_TAB, [], 3, 0);
+  check('D4 빈 값 + 이전 없음 → 요청 없음', sf3.calls.length === 0 && res3 === null);
+
+  // (5) padRows 경계: 긴 행은 잘라내고 짧은 행은 채운다
+  check('D4 padRows 폭 정규화', eq(padRows([['a', 'b', 'c', 'd'], ['x']], 3), [['a', 'b', 'c'], ['x', '', '']]));
+})();
+
+/* =========================================================
+   빈 sheetId — 배포 기본값(SPREADSHEET_ID)이 비고 요청에도 없을 때
+   Sheets 를 호출하지 않고 no_sheet_selected(400) 로 끊는다.
+   ========================================================= */
+(function () {
+  // 1) 순수 해석기
+  check('resolveSheetId: 둘 다 비면 빈 문자열', resolveSheetId('', '') === '' &&
+    resolveSheetId(null, undefined) === '' && resolveSheetId('   ', '') === '');
+  check('resolveSheetId: 요청값 없으면 배포 기본값 사용', resolveSheetId('', 'ENV_ID') === 'ENV_ID' &&
+    resolveSheetId(null, 'ENV_ID') === 'ENV_ID');
+  check('resolveSheetId: 요청값이 기본값을 이긴다', resolveSheetId('REQ_ID', 'ENV_ID') === 'REQ_ID');
+  check('resolveSheetId: 공백 제거', resolveSheetId(' REQ_ID ', '') === 'REQ_ID');
+
+  // 2) 값이 있으면 기존대로 해당 시트로 Sheets 호출이 나간다
+  let calledUrl = '';
+  const sf = makeSheetsFetch('tok', resolveSheetId('', 'ENV_ID'), function (url) {
+    calledUrl = url;
+    return Promise.resolve({ ok: true, json: function () { return Promise.resolve({}); } });
+  });
+  sf('/values/A1', { method: 'GET' });
+  check('빈 요청값 + 기본값 있음 → 기본 시트로 Sheets 호출', calledUrl.indexOf('/spreadsheets/ENV_ID') > -1);
+
+  // 3) 라우팅: 각 API 경로가 makeSheetsFetch 이전에 빈 sheetId 를 끊는다
+  const w = readFileSync(join(__dir, '../src/worker.js'), 'utf8');
+  check('noSheetSelected 헬퍼가 400 no_sheet_selected 반환',
+    /function noSheetSelected\(\)[\s\S]*?no_sheet_selected[\s\S]*?\}, 400\)/.test(w));
+  ['/api/sheets', '/api/state', '/api/apply', '/api/duplicate-tab', '/api/config'].forEach(function (p) {
+    const start = w.indexOf("if (path === '" + p + "'", w.indexOf('const sheetsToken'));
+    const next = w.indexOf("if (path === '", start + 10);   // 다음 라우트 직전까지만 본다
+    const block = w.slice(start, next > start ? next : start + 700);
+    check('빈 sheetId 가드 존재: ' + p, /if \(!sheetId\) return noSheetSelected\(\);/.test(block));
+    check('가드가 makeSheetsFetch 보다 앞: ' + p,
+      block.indexOf('noSheetSelected()') > -1 &&
+      block.indexOf('noSheetSelected()') < block.indexOf('makeSheetsFetch'));
+    check('env.SPREADSHEET_ID 직접 || 폴백 제거: ' + p, !/\|\| env\.SPREADSHEET_ID/.test(block));
+  });
+
+  // 4) 배포 기본값은 빈 값으로 출고된다(공개 저장소)
+  const wr = readFileSync(join(__dir, '../wrangler.jsonc'), 'utf8');
+  check('wrangler.jsonc SPREADSHEET_ID 기본값 비어 있음', /"SPREADSHEET_ID"\s*:\s*""/.test(wr));
+
+  // 5) 클라이언트: 오류 화면이 아니라 시트 입력 안내로 시작한다
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  check('클라이언트 isNoSheet 판별 존재', /function isNoSheet\(r\)[\s\S]*?no_sheet_selected/.test(html));
+  check('클라이언트 renderNoSheet 가 시트 입력 안내 표시',
+    /function renderNoSheet\(\)[\s\S]*?setupSheetInput\(\)[\s\S]*?URL 또는 ID/.test(html));
+  const loadSheetsFn = html.slice(html.indexOf('function loadSheets()'), html.indexOf('function isNoSheet'));
+  check('loadSheets 가 no_sheet_selected 를 안내 화면으로 처리',
+    /isNoSheet\(r\)\) \{ renderNoSheet\(\); return false; \}/.test(loadSheetsFn));
+  const loadStateFn = html.slice(html.indexOf('function loadState(sheetId, tab)'), html.indexOf('function onState'));
+  check('loadState 가 no_sheet_selected 를 안내 화면으로 처리',
+    /isNoSheet\(r\)\) \{ renderNoSheet\(\); return; \}/.test(loadStateFn));
+})();
+
+/* =========================================================
+   worker.js 정적 검증 — 데이터 파괴 경로가 코드에 남아 있지 않은지
+   (worker.js 는 index.html/core 를 텍스트로 import 해 Node 에서 직접 import 불가)
+   ========================================================= */
+(function () {
+  const w = readFileSync(join(__dir, '../src/worker.js'), 'utf8');
+  const sh = readFileSync(join(__dir, '../src/lib/sheets.js'), 'utf8');
+
+  // D1: 설정 저장 전 unavailable 검사 → 503 config_unavailable
+  check('D1 handleConfig 에 config_unavailable 503 경로 존재',
+    /config_unavailable/.test(w) && /\}, 503\)/.test(w));
+  const cfgFn = w.slice(w.indexOf('async function handleConfig(sf'), w.indexOf('DEV MODE 핸들러'));
+  check('D1 unavailable 검사가 쓰기(overwriteSheetRange)보다 앞',
+    cfgFn.indexOf('cur.unavailable') > -1 &&
+    cfgFn.indexOf('cur.unavailable') < cfgFn.indexOf('overwriteSheetRange'));
+  check('D1 handleConfig 에 빈 해시 폴백(hashValues([])) 없음', !/hashValues\(\[\]\)/.test(cfgFn));
+
+  // D2: apply 경로에서 tab_not_found 가 어떤 쓰기보다 앞
+  const applyFn = w.slice(w.indexOf('async function handleApply(sf'), w.indexOf('async function handleDuplicateTab'));
+  check('D2 handleApply 에 tab_not_found 400 존재', /tab_not_found/.test(applyFn));
+  check('D2 tab_not_found 검사가 batchUpdateValues 보다 앞',
+    applyFn.indexOf('tab_not_found') < applyFn.indexOf('batchUpdateValues'));
+  check('D2 handleApply 이 body.tab 을 pickTimetableTab 으로 폴백하지 않음',
+    !/body\.tab.*\n?.*pickTimetableTab/.test(applyFn));
+  // dev 핸들러도 동일 계약 미러링
+  check('D2 dev apply 도 tab_not_found 미러링',
+    /function handleApplyDev/.test(w) &&
+    w.slice(w.indexOf('function handleApplyDev')).indexOf('tab_not_found') > -1);
+
+  // D3: 은닉된 오류가 로그로는 남는다
+  check('D3 logError 헬퍼 존재', /function logError\(/.test(w));
+  check('D3 console.error 사용', /console\.error\(/.test(w));
+  check('D3 mapSheetsError 직전 로깅', /logError\('sheets_api'/.test(w));
+  ['readConfigWithVersion', 'readLinkedPinned', 'electives(연결그룹)', 'electives(선택과목코드)', 'parseDepts', 'dev_handler']
+    .forEach(function (site) {
+      check('D3 무음 catch 로깅: ' + site, w.indexOf("logError('" + site + "'") > -1);
+    });
+  // 토큰·시트 내용을 로그에 넣지 않는다
+  check('D3 로그에 토큰/그리드 미포함', !/console\.error\([^)]*(token|grid|values)/i.test(w));
+
+  // D4: 탭 전체 clear 경로 제거
+  check('D4 rewriteSheetValues 제거됨', !/rewriteSheetValues/.test(w) && !/rewriteSheetValues/.test(sh));
+  check('D4 sheets.js 에 :clear 호출 없음', !/:clear/.test(sh));
+})();
+
+/* =========================================================
+   index.html 정적 검증 — 자동 재발급/흰 화면 경로가 남아 있지 않은지
+   ========================================================= */
+(function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  // GSI ID 콜백 안에서 access token 을 자동 요청하지 않는다(제스처 소멸 → 팝업 차단)
+  const gsiCb = html.slice(html.indexOf('google.accounts.id.initialize'), html.indexOf('renderButton'));
+  check('GSI ID 콜백에서 requestSheetsToken 자동 호출 없음', !/requestSheetsToken/.test(gsiCb));
+  // 메시지 정규식으로 오류를 분류하던 경로 제거
+  check('enterApp 의 정규식 오류 매칭 제거', !/sheets_token\|token_client/.test(html));
+  // 복구 UI 존재
+  check('재허용 배너 마크업 존재', /id="reauthBanner"/.test(html) && /id="reauthBtn"/.test(html));
+  check('시트 권한 허용 버튼 마크업 존재', /id="btnSheetsGrant"/.test(html));
+  // GIS 실제 오류 타입 안내 문구
+  ['popup_closed', 'popup_failed_to_open', 'access_denied', 'sheets_token_timeout'].forEach(function (t) {
+    check('GIS 오류 안내 처리: ' + t, new RegExp(t).test(html));
+  });
+  // renderNoAccess 는 ID 토큰에서 이메일을 얻는다
+  check('renderNoAccess 계정 표시에 idTokenEmail 사용', /STATE\.user \|\| idTokenEmail\(\)/.test(html));
+})();
+
+console.log('');
+if (failures.length) {
+  console.log('실패 ' + failures.length + '건:');
+  failures.forEach(function (f) { console.log('  - ' + f); });
+  process.exit(1);
+} else {
+  console.log('전체 통과');
+}

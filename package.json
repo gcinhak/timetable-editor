@@ -1,0 +1,13 @@
+{
+  "name": "timetable-editor-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-core": "bash scripts/sync-core.sh",
+    "test": "node test/run_tests.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": { "wrangler": "^4.110.0" }
+}

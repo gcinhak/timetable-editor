@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "timetable-editor",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-06-01",
+  "rules": [
+    { "type": "Text", "globs": ["**/*.html"], "fallthrough": true },
+    { "type": "Text", "globs": ["**/core/*.js"], "fallthrough": true }
+  ],
+  // console.error 로그를 Workers Logs 에서 조회하기 위함(교사 장애 신고 시 원인 추적).
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    // 선택 사항: 기본으로 열 스프레드시트 ID. 비워 두면 앱은 시트 주소 입력 안내로 시작하고,
+    // 교사가 입력한 시트(최근 시트는 브라우저에 기억)를 사용한다.
+    "SPREADSHEET_ID": "",
+    "ALLOWED_DOMAIN": "gvcs-mg.org",
+    // 배포 조직의 GCP 프로젝트에 만든 timetable 전용 OAuth 클라이언트.
+    // 승인된 JavaScript 원본에 배포 Worker URL 등록 필요. 스코프: .../auth/spreadsheets
+    "GOOGLE_CLIENT_ID": "133787219449-g441jie8vc2152a2cm481vlffhtguq6g.apps.googleusercontent.com"
+  }
+  // 시크릿 없음. 시트 접근은 로그인 사용자 본인의 OAuth access token(X-Sheets-Token 헤더)으로만 수행한다.
+  // → OAuth 클라이언트에 https://www.googleapis.com/auth/spreadsheets 스코프가 필요.
+}
