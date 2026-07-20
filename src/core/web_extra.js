@@ -157,6 +157,7 @@ function parsePinnedManual_(rows) {
 
 // [정규교시] 블록: 학년 | 요일 | 교시. → [{grade,day,period}]
 // 요일/교시 형식 불일치 행은 null(파싱 실패) → parseConfig 에서 rawExtras 로 이동.
+// 사용처 없음(이동 규칙 제거됨) — 기존 시트의 [정규교시] 내용을 왕복 보존하려고 파싱만 유지한다.
 function parseRegularSlot_(r) {
   var gtext = String(r[0] == null ? '' : r[0]).trim();
   var dtext = String(r[1] == null ? '' : r[1]).trim();

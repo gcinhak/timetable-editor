@@ -261,19 +261,55 @@ export function toggleGradeSlot(blocks, day, period, grade) {
 // 각 반 GA/GB/GC 상태: 'busy'(수업 커버) | 'partial'('G일부' 매핑 과목만 존재) | 'free'.
 // index.html 인라인 미러(gradeFreeState) 와 로직 동일 유지 — 브라우저는 state.js 미주입.
 var GF_SUBJECT_RE = /^(.+?)(7|8|9|10|11|12)([A-C])$/;
-function isRegularRegistered(config, G, S) {
-  var reg = (config && config.regularSlots) || [];
-  for (var i = 0; i < reg.length; i++) {
-    if (reg[i].grade === G && reg[i].day === S.day && reg[i].period === S.period) return true;
-  }
-  return false;
+// 과목명 하나가 학년 G 에서 차지하는 대상(순수). 해당 없으면 null.
+//  { classes: ['10A',...], partial: bool } — classes 는 반 단위 점유, partial 은 'G일부' 매핑.
+//  ① 과목명 파싱(Eng10A) 우선 → 파싱되면 무반 매핑은 보지 않는다. ② 무반 과목은 classless 토큰으로 판정.
+export function subjectGradeTargets(subj, G, classless) {
+  subj = String(subj == null ? '' : subj).trim();
+  if (!subj || isRaValue(subj)) return null;
+  var m = GF_SUBJECT_RE.exec(subj);
+  if (m) return (parseInt(m[2], 10) === G) ? { classes: [m[2] + m[3]], partial: false } : null;
+  var toks = (classless || {})[subj];
+  if (!toks) return null;                    // 미분류/매핑없음 → 무시
+  var out = { classes: [], partial: false };
+  toks.forEach(function (tok) {
+    tok = String(tok).trim();
+    var mm;
+    if ((mm = /^(\d+)\s*전체$/.exec(tok)) && parseInt(mm[1], 10) === G) {          // G전체
+      out.classes = [G + 'A', G + 'B', G + 'C'];
+    } else if ((mm = /^(\d+)([A-C])$/.exec(tok)) && parseInt(mm[1], 10) === G) {   // 반 토큰
+      if (out.classes.indexOf(mm[1] + mm[2]) === -1) out.classes.push(mm[1] + mm[2]);
+    } else if ((mm = /^(\d+)\s*일부$/.exec(tok)) && parseInt(mm[1], 10) === G) {   // G일부
+      out.partial = true;
+    }
+  });
+  return (out.classes.length || out.partial) ? out : null;
 }
+
+// 학년 G 의 슬롯별 편성 과목(순수). 반환: 길이 40 배열, 각 원소는 중복 제거된 과목명 배열.
+// 모델을 한 번만 훑어 인덱스를 만든다(칸마다 재순회 금지). 과목명 → 판정 결과는 메모이즈.
+export function gradeSubjectIndex(model, config, G) {
+  var classless = (config && config.classless) || {};
+  var out = [];
+  for (var i = 0; i < 40; i++) out.push([]);
+  var memo = Object.create(null);
+  var entries = (model && model.entries) || [];
+  entries.forEach(function (e) {
+    var slots = e.slots || [];
+    for (var s = 0; s < 40; s++) {
+      var subj = slots[s];
+      if (subj == null) continue;
+      subj = String(subj).trim();
+      if (!subj) continue;
+      var hit = memo[subj];
+      if (hit === undefined) hit = memo[subj] = !!subjectGradeTargets(subj, G, classless);
+      if (hit && out[s].indexOf(subj) === -1) out[s].push(subj);   // 팀티칭 중복 제거
+    }
+  });
+  return out;
+}
+
 export function gradeFreeState(model, config, G, S) {
-  // 7·8교시는 방과후 특별 수업 시간 — 공강 판정 대상 아님.
-  // 단 [정규교시]에 (학년,요일,교시) 등록된 슬롯은 일반 판정을 계속 진행.
-  if (S.period >= 7 && !isRegularRegistered(config, G, S)) {
-    return { classes: {}, cover: {}, freeClasses: [], partialClasses: [], busyClasses: [], blockedClasses: [], raClasses: [], covered: false, label: '방과후', kind: 'after' };
-  }
   var classless = (config && config.classless) || {};
   var fixedBlocks = (config && config.fixedBlocks) || [];
   var idx = S.day * 8 + (S.period - 1);
@@ -317,24 +353,10 @@ export function gradeFreeState(model, config, G, S) {
       }
       return;
     }
-    var m = GF_SUBJECT_RE.exec(subj);
-    if (m) {                                   // ① 과목명 파싱
-      if (parseInt(m[2], 10) === G) { var pc = m[2] + m[3]; busy[pc] = true; cover[pc].push(subj); }
-      return;                                  // 파싱되면 무반 매핑 조회 안 함
-    }
-    var toks = classless[subj];
-    if (!toks) return;                         // 미분류/매핑없음 → 무시
-    toks.forEach(function (tok) {
-      tok = String(tok).trim();
-      var mm;
-      if ((mm = /^(\d+)\s*전체$/.exec(tok)) && parseInt(mm[1], 10) === G) {          // ② G전체
-        order.forEach(function (c) { busy[c] = true; cover[c].push(subj); });
-      } else if ((mm = /^(\d+)([A-C])$/.exec(tok)) && parseInt(mm[1], 10) === G) {   // ③ 반 토큰
-        var cc = mm[1] + mm[2]; busy[cc] = true; cover[cc].push(subj);
-      } else if ((mm = /^(\d+)\s*일부$/.exec(tok)) && parseInt(mm[1], 10) === G) {   // G일부
-        partialGrade = true;
-      }
-    });
+    var tg = subjectGradeTargets(subj, G, classless);
+    if (!tg) return;
+    tg.classes.forEach(function (c) { busy[c] = true; if (cover[c]) cover[c].push(subj); });
+    if (tg.partial) partialGrade = true;
   });
   var classes = {}, freeC = [], partialC = [], busyC = [], blockedC = [];
   order.forEach(function (c) {

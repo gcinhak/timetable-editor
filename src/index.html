@@ -259,32 +259,42 @@
   .blk-badge-all, .blk-badge-part { font-size: 10px; border-radius: 8px; padding: 1px 7px; font-weight: 600; white-space: nowrap; }
   .blk-badge-all { background: #f3c6c6; color: #8a2b2b; }
   .blk-badge-part { background: #f5e6a8; color: #7a5c00; }
-  /* 학년별 시간 매트릭스 */
+  /* 공강 현황 통합 매트릭스 */
   table.gh-matrix { border-collapse: collapse; margin: 10px 0; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
   table.gh-matrix th, table.gh-matrix td { border: 1px solid #e3e6ea; text-align: center; font-size: 12px; }
-  table.gh-matrix th { background: #f0f3f7; color: #44506a; font-weight: 700; padding: 6px 12px; cursor: pointer; user-select: none; }
+  table.gh-matrix th { background: #f0f3f7; color: #44506a; font-weight: 700; padding: 6px 12px; cursor: default; user-select: none; }
   table.gh-matrix th.gh-corner { cursor: default; background: #fff; }
-  table.gh-matrix td.gh-cell {
-    width: 76px; max-width: 76px; height: 36px; cursor: pointer; user-select: none;
-    font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 0 4px;
-  }
-  table.gh-matrix td.gh-ok { background: #f4faf4; }
-  table.gh-matrix td.gh-ok:hover { background: #e2f0e2; }
-  table.gh-matrix td.gh-no { background: #f3c6c6; color: #8a2b2b; font-weight: 600; }
-  /* 라벨(고정 일정)이 있는 불가 칸은 청회색으로 구분 */
-  table.gh-matrix td.gh-no.gh-label { background: #dfe5ee; color: #3d4a63; }
-  table.gh-matrix td.gh-part { background: #f5e6a8; color: #7a5c00; font-weight: 600; }
-  table.gh-matrix td.gh-drag { outline: 2px solid #2f5fa8; outline-offset: -2px; }
-  table.gh-matrix th:not(.gh-corner):hover { background: #dfe8f5; }
+  table.gh-matrix th.gh-bulk { cursor: pointer; }
+  table.gh-matrix th.gh-bulk:hover { background: #dfe8f5; }
   .gh-grades { margin: 6px 0; }
   .gh-grades button { font-size: 12px; padding: 3px 10px; margin-right: 4px; border: 1px solid #bbb; border-radius: 4px; background: #fff; cursor: pointer; }
   #settings .gh-grades button.active { background: #2f5fa8; color: #fff; border-color: #2f5fa8; font-weight: 700; }
   .gh-grades button.active { background: #2b6cb0; color: #fff; border-color: #2b6cb0; }
-  /* 학년별 공강 현황(조회 전용) */
+  /* 공강 현황 셀 */
   table.gh-matrix td.gf-cell {
-    cursor: default; width: 76px; max-width: 76px; min-height: 36px;
+    position: relative; cursor: default; width: 104px; max-width: 104px; height: 40px;
+    vertical-align: top;
     font-size: 11px; white-space: normal; word-break: break-all; overflow-wrap: anywhere;
-    line-height: 1.2; padding: 2px 4px;
+    line-height: 1.2; padding: 3px 4px;
+  }
+  /* 상태 줄(공강/금지) — 칸의 1순위 정보 */
+  table.gh-matrix td.gf-cell .gf-st { min-height: 13px; }
+  /* 과목 줄 — 2순위. 상태 줄과 섞이지 않게 점선으로 구분하고 작고 옅게 */
+  table.gh-matrix td.gf-cell .gf-subj {
+    margin-top: 3px; padding-top: 2px; border-top: 1px dotted rgba(0,0,0,.18);
+    font-size: 9.5px; line-height: 1.25; font-weight: 400; color: #5c6474;
+    letter-spacing: -0.2px;
+  }
+  /* 상태 줄이 없는 칸(수업으로 꽉 찬 칸)은 구분선·여백 없이 과목만 */
+  table.gh-matrix td.gf-cell .gf-subj-only { margin-top: 0; padding-top: 0; border-top: none; }
+  table.gh-matrix td.gf-cell .gf-subj span { display: block; overflow-wrap: anywhere; }
+  table.gh-matrix td.gf-cell .gf-subj span.gf-more { color: #98a0b0; font-style: italic; }
+  /* 배경이 짙은 칸에서도 과목이 읽히게 대비 확보 */
+  table.gh-matrix td.gf-blocked .gf-subj { color: #3d4a63; }
+  /* 금지 슬롯에 수업이 편성돼 있으면 그 자체가 이상 신호 — 사선 무늬 위에서도 또렷하게(마지막에 선언해 우선) */
+  table.gh-matrix td.gf-nogo .gf-subj {
+    color: #6d1f1f; font-weight: 600; border-top-color: rgba(138,43,43,.45);
+    text-shadow: 0 0 2px #fff, 0 0 2px #fff;
   }
   table.gh-matrix td.gf-all  { background: #d9ead3; color: #274e13; font-weight: 600; }
   table.gh-matrix td.gf-some { background: #eaf5e0; color: #3c6b1e; font-weight: 600; }
@@ -308,22 +318,60 @@
   table.grid td.gfr-blocked { background: #dfe5ee; color: #3d4a63; font-weight: 600; }
   table.grid td.gfr-none { background: #fff; }
   table.grid td.gfr-ra { background: #e4e4e4; color: #666; }
-  table.gh-matrix td.gf-after, table.grid td.gfr-after { background: #f2f2f2; color: #9aa0a8; }
   /* RA 감독 배정: 클릭 가능한 공강 셀 */
   table.grid tr.gf-row td.gfr-all, table.grid tr.gf-row td.gfr-some, table.grid tr.gf-row td.gfr-partial { cursor: pointer; }
   table.gh-matrix td.gf-all, table.gh-matrix td.gf-some, table.gh-matrix td.gf-part { cursor: pointer; }
-  /* 정규교시 등록: 방과후(after) 셀 클릭으로 등록 / 등록된 셀 표시(코너 점) */
-  table.gh-matrix td.gf-after, table.grid td.gfr-after { cursor: pointer; }
-  table.gh-matrix td.gf-reg, table.grid td.gfr-reg { position: relative; cursor: pointer; }
-  table.gh-matrix td.gf-reg::after, table.grid td.gfr-reg::after {
-    content: ''; position: absolute; top: 2px; right: 2px;
-    width: 5px; height: 5px; border-radius: 50%; background: #6a8caf;
+  /* 금지 슬롯(학년 전체) — 색이 아니라 사선 무늬로 구분(색약 고려) */
+  table.gh-matrix td.gf-nogo {
+    background-color: #f3c6c6; color: #8a2b2b; font-weight: 700;
+    background-image: repeating-linear-gradient(45deg, rgba(138,43,43,.26) 0 3px, rgba(0,0,0,0) 3px 7px);
   }
-  .ra-revert {
-    margin-top: 4px; padding: 6px 10px; font-size: 12px;
-    background: #f2f2f2; color: #666; border: 1px solid #ddd; border-radius: 6px; cursor: pointer;
+  /* 부분 금지(학년 일부/반 단위) — 왼쪽 아래 모서리 삼각 표식 */
+  table.gh-matrix td.gf-pblock::before {
+    content: ''; position: absolute; left: 0; bottom: 0;
+    border-width: 0 0 8px 8px; border-style: solid; border-color: transparent transparent #b8860b transparent;
   }
-  .ra-revert:hover { background: #e8e8e8; }
+  /* 모드 전환 바 */
+  .gf-modebar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .gf-modebar button {
+    font-size: 12px; padding: 4px 12px; border: 1px solid #bbb; border-radius: 4px;
+    background: #fff; color: #333; cursor: pointer;
+  }
+  #settings .gf-modebar button.active { background: #2f5fa8; color: #fff; border-color: #2f5fa8; font-weight: 700; }
+  #settings .gf-modebar button.active[data-gfmode="paint"] { background: #b3261e; border-color: #b3261e; }
+  .gf-modehint { font-size: 11px; color: #666; flex: 1 1 100%; }
+  .gf-modehint.warn-hint { color: #b3261e; font-weight: 600; }
+  /* 칠하기 모드: 칸 전체가 클릭 대상 */
+  .gf-paintmode table.gh-matrix td.gf-cell { cursor: cell; user-select: none; }
+  .gf-paintmode table.gh-matrix td.gf-cell:hover { outline: 2px solid #b3261e; outline-offset: -2px; }
+  table.gh-matrix td.gf-paint-on { outline: 2px solid #b3261e; outline-offset: -2px; background-color: #f7dede; }
+  table.gh-matrix td.gf-paint-off { outline: 2px dashed #b3261e; outline-offset: -2px; background-color: #eef3fa; }
+  /* 범례 */
+  .gf-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 2px; font-size: 11px; color: #555; }
+  .gf-legend span.lg { display: inline-flex; align-items: center; gap: 5px; }
+  .gf-legend i.sw {
+    display: inline-block; width: 15px; height: 13px; border: 1px solid #cfd6e0; border-radius: 2px;
+    position: relative; flex: none;
+  }
+  .gf-legend i.sw-all { background: #d9ead3; }
+  .gf-legend i.sw-some { background: #eaf5e0; }
+  .gf-legend i.sw-part { background: #f5e6a8; }
+  .gf-legend i.sw-busy { background: #fff; }
+  .gf-legend i.sw-ra { background: #e4e4e4; }
+  .gf-legend i.sw-nogo {
+    background-color: #f3c6c6;
+    background-image: repeating-linear-gradient(45deg, rgba(138,43,43,.26) 0 3px, rgba(0,0,0,0) 3px 7px);
+  }
+  .gf-legend i.sw-pblock::before {
+    content: ''; position: absolute; left: 0; bottom: 0;
+    border-width: 0 0 7px 7px; border-style: solid; border-color: transparent transparent #b8860b transparent;
+  }
+  .gf-legend i.sw-subj { background: #fff; }
+  .gf-legend i.sw-subj::after {
+    content: ''; position: absolute; left: 2px; right: 2px; bottom: 2px; height: 6px;
+    border-top: 1px dotted #99a;
+    background: repeating-linear-gradient(180deg, #aeb5c2 0 1px, transparent 1px 3px);
+  }
 
   /* 연결 그룹 카드 */
   .chip { display: inline-flex; align-items: center; gap: 4px; background: #eef1f5; color: #2f5fa8;
@@ -442,7 +490,6 @@
   </header>
   <div id="settingsTabs" class="tabbar">
     <button type="button" data-tab="block">금지 슬롯</button>
-    <button type="button" data-tab="gradehours">학년별 시간</button>
     <button type="button" data-tab="group">연결 그룹</button>
     <button type="button" data-tab="classless">무반 과목</button>
     <button type="button" data-tab="team">팀티칭</button>
@@ -729,9 +776,11 @@ var PN_UI = { open: {} }; // 고정 수업 카드: 카드 인덱스별 교시 �
 var UV_UI = { open: {}, q: {} }; // 불가 시간 카드: 카드별 교시 추가패널 열림(open)/교사 검색어(q)
 var CL_UI = { open: '', q: '', unclassifiedOnly: false }; // 무반 과목 카드: 열린 과목/검색어/미분류 필터
 var FB_UI = { open: {} }; // 금지 슬롯 카드: 블록 인덱스별 대상 선택 패널 열림
-var GH_UI = { grade: 7 }; // 학년별 시간 매트릭스: 선택 학년(7~12)
-var GF_UI = { grade: 10 }; // 학년별 공강 현황: 선택 학년(7~12)
-var GH_DRAG = null; // 드래그 범위 칠하기 상태: { action: 'PAINT'|'ERASE', cells: {key:{day,period}} }
+// 공강 현황(통합 매트릭스): 선택 학년(7~12) + 조작 모드
+//   mode 'view'  = 조회·배정 (RA 감독 배정)
+//   mode 'paint' = 금지 슬롯 칠하기 (클릭·드래그 → 즉시 저장)
+var GF_UI = { grade: 10, mode: 'view' };
+var GF_PAINT = null; // 드래그 범위 칠하기 상태: { action: 'PAINT'|'ERASE', cells: {key:{day,period}} }
 var GRP_PEEK_TIMER = null;    // [그리드에서 보기] 하이라이트 타이머
 
 function markDev() {
@@ -1208,17 +1257,6 @@ function renderGrid() {
       openRaAssign(+td.dataset.day, +td.dataset.period, +td.dataset.grade);
     });
   });
-  wrap.querySelectorAll('td.gfr-after').forEach(function (td) {
-    td.addEventListener('click', function () {
-      registerRegularSlot(+td.dataset.grade, +td.dataset.day, +td.dataset.period);
-    });
-  });
-  wrap.querySelectorAll('td.gfr-reg').forEach(function (td) {
-    if (td.classList.contains('gfr-all') || td.classList.contains('gfr-some') || td.classList.contains('gfr-partial')) return;
-    td.addEventListener('click', function () {
-      unregisterRegularSlot(+td.dataset.grade, +td.dataset.day, +td.dataset.period);
-    });
-  });
   fitCells();
 }
 
@@ -1621,31 +1659,6 @@ function postConfig(config, keepOpen) {
   });
 }
 
-/* =========================================================
-   정규교시(정규 수업시간) 등록/해제 — regularSlots 조작
-   ========================================================= */
-var REG_DAY_NAMES = ['월', '화', '수', '목', '금'];
-function isRegularRegistered2(config, G, day, period) {
-  var reg = (config && config.regularSlots) || [];
-  for (var i = 0; i < reg.length; i++) {
-    if (reg[i].grade === G && reg[i].day === day && reg[i].period === period) return true;
-  }
-  return false;
-}
-function registerRegularSlot(G, day, period) {
-  if (!confirm(G + '학년 ' + REG_DAY_NAMES[day] + ' ' + period + '교시를 정규 수업시간으로 등록할까요?')) return;
-  var cfg = cloneConfig(STATE.config);
-  cfg.regularSlots = (cfg.regularSlots || []).slice();
-  cfg.regularSlots.push({ grade: G, day: day, period: period });
-  postConfig(cfg).then(function () { renderGradeFreeIfOpen(); });
-}
-function unregisterRegularSlot(G, day, period) {
-  if (!confirm(G + '학년 ' + REG_DAY_NAMES[day] + ' ' + period + '교시를 방과후로 되돌릴까요?')) return;
-  var cfg = cloneConfig(STATE.config);
-  cfg.regularSlots = (cfg.regularSlots || []).filter(function (s) { return !(s.grade === G && s.day === day && s.period === period); });
-  postConfig(cfg).then(function () { renderGradeFreeIfOpen(); });
-}
-
 var TOAST_TIMER = null;
 function toast(msg) {
   var el = document.getElementById('toast');
@@ -1701,15 +1714,21 @@ function optionsHtml(options, selected) {
   }).join('');
 }
 
+// 저장된 fixedBlocks(grades: 'all' 축약형 포함) → 편집용 형태(grades 배열)로 정규화.
+// DRAFT 편집(금지 슬롯 탭)과 공강 현황 탭의 즉시 저장이 같은 형태를 쓰도록 공용화한다.
+function normalizeBlocks(raw) {
+  return (raw || []).map(function (b) {
+    return { day: b.day, period: b.period, label: b.label || '',
+      grades: (b.grades === 'all') ? [7, 8, 9, 10, 11, 12] : (b.grades || []).slice(),
+      partialGrades: (b.partialGrades || []).slice(),
+      classes: (b.classes || []).slice() };
+  });
+}
+
 function buildDraftFromConfig() {
   var c = STATE.config || {};
   DRAFT = {
-    fixedBlocks: (c.fixedBlocks || []).map(function (b) {
-      return { day: b.day, period: b.period, label: b.label || '',
-        grades: (b.grades === 'all') ? [7, 8, 9, 10, 11, 12] : (b.grades || []).slice(),
-        partialGrades: (b.partialGrades || []).slice(),
-        classes: (b.classes || []).slice() };
-    }),
+    fixedBlocks: normalizeBlocks(c.fixedBlocks),
     groups: (function () { var g = c.linkedGroups || {}; return Object.keys(g).map(function (k) { return { name: k, subjects: (g[k] || []).slice() }; }); })(),
     classless: (function () { var o = {}, m = c.classless || {}; Object.keys(m).forEach(function (k) { o[k] = (m[k] || []).slice(); }); return o; })(),
     team: (function () { var t = c.teamTeaching || {}; return Object.keys(t).map(function (k) { return { subject: k, teachers: (t[k] || []).slice() }; }); })(),
@@ -2253,74 +2272,67 @@ function ghPartClasses(blocks, day, period, grade) {
   if (!rule || rule.grades === 'all') return [];
   return (rule.classes || []).filter(function (cl) { return parseInt(cl, 10) === grade; });
 }
+// 시트에 저장된(=현재 확정된) 금지 슬롯 규칙을 편집용 형태로 읽는다.
+// 공강 현황 탭은 DRAFT 가 아니라 STATE.config 를 기준으로 즉시 저장하므로 이 함수를 쓴다.
+function gfBlocks() { return normalizeBlocks(STATE.config && STATE.config.fixedBlocks); }
 // 해당 학년의 40칸(5요일×8교시) 중 '불가'/'일부' 칸 수 집계
-function ghGradeCounts(grade) {
+function ghGradeCounts(grade, blocks) {
   var no = 0, part = 0;
   for (var d = 0; d < 5; d++) for (var p = 1; p <= 8; p++) {
-    var s = ghState(DRAFT.fixedBlocks, d, p, grade);
+    var s = ghState(blocks, d, p, grade);
     if (s === '불가') no++; else if (s === '일부') part++;
   }
   return { no: no, part: part };
-}
-function gradeMatrixHtml() {
-  var g = GH_UI.grade;
-  var html = '<div class="gh-grades">';
-  [7, 8, 9, 10, 11, 12].forEach(function (gr) {
-    var n = ghGradeCounts(gr).no;
-    var lbl = gr + '학년' + (n ? ' (' + n + ')' : '');
-    html += '<button data-act="ghGrade" data-g="' + gr + '"' + (gr === g ? ' class="active"' : '') + '>' + lbl + '</button>';
-  });
-  html += '</div>';
-  // 행=교시(1~8), 열=요일(월~금)
-  html += '<table class="gh-matrix"><thead><tr><th class="gh-corner"></th>';
-  for (var d = 0; d < 5; d++) html += '<th data-act="ghDay" data-day="' + d + '" title="클릭: 이 요일 일괄 전환">' + DAYS[d] + '</th>';
-  html += '</tr></thead><tbody>';
-  for (var p = 1; p <= 8; p++) {
-    html += '<tr><th data-act="ghPeriod" data-period="' + p + '" title="클릭: 이 교시 일괄 전환">' + p + '교시</th>';
-    for (var dd = 0; dd < 5; dd++) {
-      var st = ghState(DRAFT.fixedBlocks, dd, p, g);
-      var cls = st === '불가' ? 'gh-no' : st === '일부' ? 'gh-part' : 'gh-ok';
-      // 금지 슬롯 규칙에 라벨(예: Counseling)이 있으면 '불가'/'일부' 대신 라벨 표기
-      var ruleLbl = '';
-      if (st !== '가능') {
-        var rl = DRAFT.fixedBlocks.find(function (b) { return b.day === dd && b.period === p; });
-        ruleLbl = (rl && (rl.label || '').trim()) || '';
-      }
-      if (ruleLbl && st === '불가') cls += ' gh-label';
-      var txt = st === '불가' ? (esc(ruleLbl) || '불가') : st === '일부' ? (esc(ruleLbl) || '일부') : '';
-      var titleTxt;
-      if (st === '가능') {
-        titleTxt = '클릭: 불가로 전환';
-      } else if (st === '불가') {
-        titleTxt = (ruleLbl ? ruleLbl + ' — ' : '') + '클릭: 가능으로 전환';
-      } else { // 일부
-        var info = '';
-        var rulePart = DRAFT.fixedBlocks.find(function (b) { return b.day === dd && b.period === p; });
-        if (rulePart && (rulePart.partialGrades || []).indexOf(g) !== -1) {
-          info = '일부 허용(정규 금지)';
-        } else {
-          var cs = ghPartClasses(DRAFT.fixedBlocks, dd, p, g);
-          if (cs.length) info = '반 단위 금지: ' + cs.join(', ');
-        }
-        titleTxt = (info ? info + ' — ' : '') + '클릭: 학년 전체 불가로 전환';
-      }
-      var title = ' title="' + esc(titleTxt) + '"';
-      html += '<td class="gh-cell ' + cls + '" data-day="' + dd + '" data-period="' + p + '"' + title + '>' + txt + '</td>';
-    }
-    html += '</tr>';
-  }
-  html += '</tbody></table>';
-  return html;
 }
 /* =========================================================
    학년별 공강 현황 (조회 전용) — state.js gradeFreeState 인라인 미러
    ========================================================= */
 var GF_SUBJECT_RE2 = /^(.+?)(7|8|9|10|11|12)([A-C])$/;
+// state.js subjectGradeTargets 인라인 미러 — 과목명이 학년 G 에서 차지하는 대상(없으면 null)
+function subjectGradeTargets(subj, G, classless) {
+  subj = String(subj == null ? '' : subj).trim();
+  if (!subj || isRaValue(subj)) return null;
+  var m = GF_SUBJECT_RE2.exec(subj);
+  if (m) return (parseInt(m[2], 10) === G) ? { classes: [m[2] + m[3]], partial: false } : null;
+  var toks = (classless || {})[subj];
+  if (!toks) return null;
+  var out = { classes: [], partial: false };
+  toks.forEach(function (tok) {
+    tok = String(tok).trim();
+    var mm;
+    if ((mm = /^(\d+)\s*전체$/.exec(tok)) && parseInt(mm[1], 10) === G) {
+      out.classes = [G + 'A', G + 'B', G + 'C'];
+    } else if ((mm = /^(\d+)([A-C])$/.exec(tok)) && parseInt(mm[1], 10) === G) {
+      if (out.classes.indexOf(mm[1] + mm[2]) === -1) out.classes.push(mm[1] + mm[2]);
+    } else if ((mm = /^(\d+)\s*일부$/.exec(tok)) && parseInt(mm[1], 10) === G) {
+      out.partial = true;
+    }
+  });
+  return (out.classes.length || out.partial) ? out : null;
+}
+// state.js gradeSubjectIndex 인라인 미러 — 모델 1회 순회로 슬롯별(0~39) 과목 목록을 만든다.
+// 매트릭스 40칸이 각자 모델을 재순회하지 않도록 렌더 시작에서 한 번만 만들어 넘긴다.
+function gradeSubjectIndex(model, config, G) {
+  var classless = (config && config.classless) || {};
+  var out = [];
+  for (var i = 0; i < SLOT_COUNT; i++) out.push([]);
+  var memo = Object.create(null);
+  var entries = (model && model.entries) || [];
+  entries.forEach(function (e) {
+    var slots = e.slots || [];
+    for (var s = 0; s < SLOT_COUNT; s++) {
+      var subj = slots[s];
+      if (subj == null) continue;
+      subj = String(subj).trim();
+      if (!subj) continue;
+      var hit = memo[subj];
+      if (hit === undefined) hit = memo[subj] = !!subjectGradeTargets(subj, G, classless);
+      if (hit && out[s].indexOf(subj) === -1) out[s].push(subj);   // 팀티칭 중복 제거
+    }
+  });
+  return out;
+}
 function gradeFreeState(model, config, G, S) {
-  // 7·8교시는 방과후 특별 수업 시간 — 공강 판정 대상 아님(정규 등록된 슬롯은 예외)
-  if (S.period >= 7 && !isRegularRegistered2(config, G, S.day, S.period)) {
-    return { classes: {}, cover: {}, freeClasses: [], partialClasses: [], busyClasses: [], blockedClasses: [], raClasses: [], covered: false, label: '방과후', kind: 'after' };
-  }
   var classless = (config && config.classless) || {};
   var fixedBlocks = (config && config.fixedBlocks) || [];
   var idx = S.day * 8 + (S.period - 1);
@@ -2364,24 +2376,10 @@ function gradeFreeState(model, config, G, S) {
       }
       return;
     }
-    var m = GF_SUBJECT_RE2.exec(subj);
-    if (m) {
-      if (parseInt(m[2], 10) === G) { var pc = m[2] + m[3]; busy[pc] = true; cover[pc].push(subj); }
-      return;
-    }
-    var toks = classless[subj];
-    if (!toks) return;
-    toks.forEach(function (tok) {
-      tok = String(tok).trim();
-      var mm;
-      if ((mm = /^(\d+)\s*전체$/.exec(tok)) && parseInt(mm[1], 10) === G) {
-        order.forEach(function (c) { busy[c] = true; cover[c].push(subj); });
-      } else if ((mm = /^(\d+)([A-C])$/.exec(tok)) && parseInt(mm[1], 10) === G) {
-        var cc = mm[1] + mm[2]; busy[cc] = true; cover[cc].push(subj);
-      } else if ((mm = /^(\d+)\s*일부$/.exec(tok)) && parseInt(mm[1], 10) === G) {
-        partialGrade = true;
-      }
-    });
+    var tg = subjectGradeTargets(subj, G, classless);
+    if (!tg) return;
+    tg.classes.forEach(function (c) { busy[c] = true; if (cover[c]) cover[c].push(subj); });
+    if (tg.partial) partialGrade = true;
   });
   var classes = {}, freeC = [], partialC = [], busyC = [], blockedC = [];
   order.forEach(function (c) {
@@ -2409,7 +2407,7 @@ function raFreeCellLabel(r, bd, G) {
   if (r.kind === 'partial') { var base = G + '일부'; return gradeSups.length ? base + '\n' + gradeSups.join(',') : base; }
   if (r.kind === 'all') { var order = [G + 'A', G + 'B', G + 'C']; var any = order.some(function (c) { return (byClass[c] || []).length; }); return any ? order.map(cls).join('\n') : '전체'; }
   if (r.kind === 'some') { var anyS = r.freeClasses.some(function (c) { return (byClass[c] || []).length; }); return r.freeClasses.map(cls).join(anyS ? '\n' : ', '); }
-  return r.label;  // blocked/after/none 그대로
+  return r.label;  // blocked/none 그대로
 }
 // 그리드 삽입용 학년별 공강 행(7~12학년) — 마지막 교사 행과 RA 행 사이에 표시
 function gradeFreeGridRowsHtml() {
@@ -2420,11 +2418,9 @@ function gradeFreeGridRowsHtml() {
     for (var i = 0; i < SLOT_COUNT; i++) {
       var r = gradeFreeState(STATE.model, STATE.config, g, { day: Math.floor(i / 8), period: (i % 8) + 1 });
       var bd = raSupBreakdownAt(i, g);
-      var reg = isRegularRegistered2(STATE.config, g, Math.floor(i / 8), (i % 8) + 1);
-      var cls = 'gfr-' + r.kind + (r.covered ? ' gfr-ra' : '') + (reg ? ' gfr-reg' : '') + (i > 0 && i % 8 === 0 ? ' day-start' : '');
+      var cls = 'gfr-' + r.kind + (r.covered ? ' gfr-ra' : '') + (i > 0 && i % 8 === 0 ? ' day-start' : '');
       var text, ttl;
-      if (r.kind === 'after') { text = r.label; ttl = '방과후 특별 수업 — 공강 판정 제외'; }
-      else if (r.kind === 'blocked') { text = r.label || '불가'; ttl = '배정 금지(공강 아님)'; }
+      if (r.kind === 'blocked') { text = r.label || '불가'; ttl = '배정 금지(공강 아님)'; }
       else {
         text = raFreeCellLabel(r, { byClass: bd.byClass, gradeSups: bd.gradeSups }, g);
         ttl = [g + 'A', g + 'B', g + 'C'].map(function (c) {
@@ -2436,9 +2432,8 @@ function gradeFreeGridRowsHtml() {
         if (bd.gradeSups && bd.gradeSups.length) ttl += (ttl ? ' · ' : '') + g + '일부 감독: ' + bd.gradeSups.join(', ');
       }
       if (bd.pure.length) ttl += (ttl ? ' · ' : '') + '감독: ' + bd.pure.join(', ');
-      if (reg) ttl += (ttl ? ' · ' : '') + '정규 수업시간으로 등록됨(' + ((i % 8) + 1) + '교시)';
       var clickable = (r.kind === 'all' || r.kind === 'some' || r.kind === 'partial');
-      var dataAttr = (clickable || r.kind === 'after' || reg)
+      var dataAttr = clickable
         ? ' data-day="' + Math.floor(i / 8) + '" data-period="' + ((i % 8) + 1) + '" data-grade="' + g + '"'
         : '';
       html += '<td class="' + cls + '"' + dataAttr + ' title="' + esc(ttl) + '">' + (text ? '<div class="gfb">' + esc(text).replace(/\n/g, '<br>') + '</div>' : '') + '</td>';
@@ -2449,45 +2444,130 @@ function gradeFreeGridRowsHtml() {
 }
 
 function gradeFreeGradesHtml() {
+  var blocks = gfBlocks();
   return '<div class="gh-grades">' + [7, 8, 9, 10, 11, 12].map(function (gr) {
-    return '<button data-g="' + gr + '"' + (gr === GF_UI.grade ? ' class="active"' : '') + '>' + gr + '학년</button>';
+    var n = ghGradeCounts(gr, blocks).no;
+    return '<button data-g="' + gr + '"' + (gr === GF_UI.grade ? ' class="active"' : '') + '>' +
+      gr + '학년' + (n ? ' (금지 ' + n + ')' : '') + '</button>';
   }).join('') + '</div>';
 }
+// 모드 전환 바 — 클릭이 무슨 일을 하는지 한 곳에서 결정하고 그대로 안내한다.
+function gradeFreeModeHtml() {
+  var paint = GF_UI.mode === 'paint';
+  var h = '<div class="gf-modebar">';
+  h += '<button type="button" data-gfmode="view"' + (paint ? '' : ' class="active"') + '>조회 · 배정</button>';
+  h += '<button type="button" data-gfmode="paint"' + (paint ? ' class="active"' : '') + '>금지 슬롯 칠하기</button>';
+  h += '<span class="gf-modehint' + (paint ? ' warn-hint' : '') + '">' + (paint
+    ? '칸을 클릭하거나 드래그하면 ' + GF_UI.grade + '학년 금지 슬롯이 즉시 저장됩니다. 이 모드에서는 RA 배정이 잠기고 과목 표시가 숨겨집니다. 같은 칸을 다시 칠하면 되돌릴 수 있습니다.'
+    : '공강 칸 클릭 → RA 감독 배정. 금지 슬롯은 이 모드에서 바뀌지 않습니다.')
+    + '</span>';
+  h += '</div>';
+  return h;
+}
+function gradeFreeLegendHtml() {
+  var items = [
+    ['sw-all', '학년 전체 공강'],
+    ['sw-some', '일부 반 공강'],
+    ['sw-part', '학년 일부 공강'],
+    ['sw-busy', '수업 있음'],
+    ['sw-nogo', '금지 슬롯 — 사선 무늬 + \'금지\''],
+    ['sw-pblock', '부분 금지 — 왼쪽 아래 삼각'],
+    ['sw-ra', 'RA 감독 배정됨 — 앞에 ✓'],
+    ['sw-subj', '점선 아래 작은 글씨 = 이 학년에 편성된 과목(최대 ' + GF_SUBJ_MAX + '개, 나머지는 +N·툴팁)']
+  ];
+  return '<div class="gf-legend">' + items.map(function (it) {
+    return '<span class="lg"><i class="sw ' + it[0] + '"></i>' + esc(it[1]) + '</span>';
+  }).join('') + '</div>';
+}
+// 통합 매트릭스: 공강 상태(배경) + 금지 슬롯(사선 무늬) + 부분 금지(삼각) + RA(✓) + 정규등록(점)
 function gradeFreeMatrixHtml() {
   var g = GF_UI.grade;
+  var paint = GF_UI.mode === 'paint';
+  var blocks = gfBlocks();
+  // 슬롯별 편성 과목: 40칸 렌더 전에 한 번만 만든다(칸마다 모델 재순회 금지)
+  var subjIdx = gradeSubjectIndex(STATE.model, STATE.config, g);
+  var thCls = paint ? 'gh-bulk' : 'gh-corner';
   var html = '<table class="gh-matrix"><thead><tr><th class="gh-corner"></th>';
-  for (var d = 0; d < 5; d++) html += '<th class="gh-corner">' + DAYS[d] + '</th>';
+  for (var d = 0; d < 5; d++) {
+    html += '<th class="' + thCls + '"' + (paint ? ' data-gfbulk="day" data-day="' + d + '" title="클릭: 이 요일 금지 슬롯 일괄 전환"' : '') + '>' + DAYS[d] + '</th>';
+  }
   html += '</tr></thead><tbody>';
   for (var p = 1; p <= 8; p++) {
-    html += '<tr><th class="gh-corner">' + p + '교시</th>';
+    html += '<tr><th class="' + thCls + '"' + (paint ? ' data-gfbulk="period" data-period="' + p + '" title="클릭: 이 교시 금지 슬롯 일괄 전환"' : '') + '>' + p + '교시</th>';
     for (var dd = 0; dd < 5; dd++) {
-      var r = gradeFreeState(STATE.model, STATE.config, g, { day: dd, period: p });
-      var bd = raSupBreakdownAt(dd * 8 + (p - 1), g);
-      var reg = isRegularRegistered2(STATE.config, g, dd, p);
-      var regTtl = reg ? ' · 정규 수업시간으로 등록됨(' + p + '교시)' : '';
-      var supStr = (bd.pure.length ? ' · 감독: ' + bd.pure.join(', ') : '')
-        + (bd.gradeSups && bd.gradeSups.length ? ' · ' + g + '일부 감독: ' + bd.gradeSups.join(', ') : '');
-      if (r.kind === 'after') {
-        html += '<td class="gf-cell gf-after" data-day="' + dd + '" data-period="' + p + '" title="' + esc('방과후 특별 수업 — 공강 판정 제외' + supStr) + '">' + esc(r.label) + '</td>';
-        continue;
-      }
-      if (r.kind === 'blocked') {
-        html += '<td class="gf-cell gf-blocked' + (reg ? ' gf-reg' : '') + '" data-day="' + dd + '" data-period="' + p + '" title="' + esc('배정 금지(공강 아님)' + supStr + regTtl) + '">' + esc(r.label || '불가') + '</td>';
-        continue;
-      }
-      var cls = (r.kind === 'all' ? 'gf-all' : r.kind === 'some' ? 'gf-some' : r.kind === 'partial' ? 'gf-part' : 'gf-none') + (r.covered ? ' gf-ra' : '') + (reg ? ' gf-reg' : '');
-      var parts = [g + 'A', g + 'B', g + 'C'].map(function (c) {
-        var st = r.classes[c];
-        if (st === 'free') { var _sn = bd.byClass[c]; return c + ' 공강' + (_sn.length ? ' (감독: ' + _sn.join(', ') + ')' : ''); }
-        if (st === 'partial') return c + ' 일부';
-        return c + ': ' + (r.cover[c] || []).join('/');
-      });
-      html += '<td class="gf-cell ' + cls + '" data-day="' + dd + '" data-period="' + p + '" title="' + esc(parts.join(' · ') + supStr + regTtl) + '">' + esc(raFreeCellLabel(r, { byClass: bd.byClass, gradeSups: bd.gradeSups }, g)).replace(/\n/g, '<br>') + '</td>';
+      html += gradeFreeCellHtml(g, dd, p, blocks, paint, subjIdx[dd * 8 + (p - 1)]);
     }
     html += '</tr>';
   }
   html += '</tbody></table>';
   return html;
+}
+var GF_SUBJ_MAX = 4;   // 칸에 직접 보여줄 과목 수 — 넘치면 '+N'(전체는 툴팁)
+function gradeFreeCellHtml(g, dd, p, blocks, paint, subjects) {
+  var r = gradeFreeState(STATE.model, STATE.config, g, { day: dd, period: p });
+  var bd = raSupBreakdownAt(dd * 8 + (p - 1), g);
+  var bst = ghState(blocks, dd, p, g);           // '불가' | '일부' | '가능'
+  var blkLabel = '';
+  if (bst !== '가능') {
+    var rl = blocks.find(function (b) { return b.day === dd && b.period === p; });
+    blkLabel = (rl && (rl.label || '').trim()) || '';
+  }
+  var cls = 'gf-cell ';
+  cls += (r.kind === 'blocked' ? 'gf-blocked'
+    : r.kind === 'all' ? 'gf-all' : r.kind === 'some' ? 'gf-some' : r.kind === 'partial' ? 'gf-part' : 'gf-none');
+  if (bst === '불가') cls += ' gf-nogo';
+  else if (bst === '일부') cls += ' gf-pblock';
+  if (r.covered) cls += ' gf-ra';
+
+  // 본문: 금지 슬롯이면 금지 표기를 우선(라벨 있으면 라벨), 아니면 공강 라벨
+  var text;
+  if (bst === '불가') text = blkLabel || '금지';
+  else if (r.kind === 'blocked') text = r.label || '금지';
+  else text = (r.covered ? '✓ ' : '') + raFreeCellLabel(r, { byClass: bd.byClass, gradeSups: bd.gradeSups }, g);
+
+  // 툴팁: 상태 설명 + 이 모드에서 클릭하면 무슨 일이 일어나는지
+  var t = [];
+  if (r.kind === 'blocked') t.push('배정 금지(공강 아님)');
+  else {
+    t.push([g + 'A', g + 'B', g + 'C'].map(function (c) {
+      var st = r.classes[c];
+      if (st === 'free') { var _sn = bd.byClass[c]; return c + ' 공강' + (_sn.length ? ' (감독: ' + _sn.join(', ') + ')' : ''); }
+      if (st === 'partial') return c + ' 일부';
+      return c + ': ' + (r.cover[c] || []).join('/');
+    }).join(' · '));
+  }
+  if (bst === '불가') t.push('금지 슬롯' + (blkLabel ? '(' + blkLabel + ')' : ''));
+  else if (bst === '일부') {
+    var rp = blocks.find(function (b) { return b.day === dd && b.period === p; });
+    if (rp && (rp.partialGrades || []).indexOf(g) !== -1) t.push('부분 금지: 학년 일부(정규 금지)');
+    else {
+      var cs = ghPartClasses(blocks, dd, p, g);
+      if (cs.length) t.push('부분 금지: ' + cs.join(', '));
+    }
+  }
+  if (bd.pure.length) t.push('감독: ' + bd.pure.join(', '));
+  if (bd.gradeSups && bd.gradeSups.length) t.push(g + '일부 감독: ' + bd.gradeSups.join(', '));
+  var subjs = subjects || [];
+  if (subjs.length) t.push('편성 과목: ' + subjs.join(' / '));   // 접힌 과목도 툴팁에는 전부
+  t.push(gfClickHint(r, bst, paint));
+
+  // 본문 = 상태 줄 + 과목 줄. 칠하기 모드에서는 과목을 빼서 칠할 칸 판독을 방해하지 않는다.
+  var body = text ? '<div class="gf-st">' + esc(text).replace(/\n/g, '<br>') + '</div>' : '';
+  if (!paint && subjs.length) {
+    var shown = subjs.slice(0, GF_SUBJ_MAX);
+    body += '<div class="gf-subj' + (text ? '' : ' gf-subj-only') + '">'
+      + shown.map(function (s) { return '<span>' + esc(s) + '</span>'; }).join('')
+      + (subjs.length > shown.length ? '<span class="gf-more">+' + (subjs.length - shown.length) + '</span>' : '')
+      + '</div>';
+  }
+  return '<td class="' + cls + '" data-day="' + dd + '" data-period="' + p + '" title="' + esc(t.join(' · ')) + '">'
+    + body + '</td>';
+}
+// "이 칸을 클릭하면 무슨 일이 일어나는가" — 모드가 주동작을 결정한다.
+function gfClickHint(r, bst, paint) {
+  if (paint) return '클릭: ' + (bst === '불가' ? '금지 해제(즉시 저장)' : '금지로 지정(즉시 저장)');
+  if (r.kind === 'all' || r.kind === 'some' || r.kind === 'partial') return '클릭: RA 감독 배정';
+  return '클릭 동작 없음';
 }
 function gradeFreeNote() {
   var seen = {}, n = 0;
@@ -2505,32 +2585,46 @@ function gradeFreeNote() {
 function renderGradeFree() {
   var grades = document.getElementById('gradeFreeGrades');
   if (!grades || !STATE.model) return;   // 설정 모달의 '공강 현황' 탭이 렌더된 뒤에만 동작
-  grades.innerHTML = gradeFreeGradesHtml();
+  // 즉시 저장은 시트 기준이라 미저장 변경과 공존할 수 없다 → 칠하기 모드를 유지하지 않는다
+  if (GF_UI.mode === 'paint' && SETTINGS_DIRTY) GF_UI.mode = 'view';
+  var paint = GF_UI.mode === 'paint';
+  var sec = document.querySelector('#settingsBody .sec[data-tab="gradefree"]');
+  if (sec) sec.classList.toggle('gf-paintmode', paint);
   // 재렌더마다 컨테이너가 새로 생기므로 addEventListener 대신 onclick(멱등)으로 건다.
+  var modeEl = document.getElementById('gradeFreeMode');
+  modeEl.innerHTML = gradeFreeModeHtml();
+  modeEl.onclick = function (ev) {
+    var m = ev.target.getAttribute && ev.target.getAttribute('data-gfmode');
+    if (!m || m === GF_UI.mode) return;
+    if (m === 'paint' && !gfPaintGuard()) return;
+    GF_UI.mode = m;
+    renderGradeFree();
+  };
+  grades.innerHTML = gradeFreeGradesHtml();
   grades.onclick = function (ev) {
     var g = ev.target.getAttribute && ev.target.getAttribute('data-g');
     if (g) { GF_UI.grade = parseInt(g, 10); renderGradeFree(); }
   };
   document.getElementById('gradeFreeBody').innerHTML = gradeFreeMatrixHtml();
+  document.getElementById('gradeFreeLegend').innerHTML = gradeFreeLegendHtml();
   gradeFreeNote();
+  if (paint) {
+    // 칠하기 모드: 머리글 일괄 전환만 click 으로 (칸 자체는 드래그 핸들러가 처리)
+    document.querySelectorAll('#gradeFreeBody th[data-gfbulk]').forEach(function (th) {
+      th.addEventListener('click', function () {
+        gfBulkToggle(th.getAttribute('data-gfbulk'),
+          parseInt(th.getAttribute(th.getAttribute('data-gfbulk') === 'day' ? 'data-day' : 'data-period'), 10));
+      });
+    });
+    return;
+  }
   document.querySelectorAll('#gradeFreeBody td.gf-all, #gradeFreeBody td.gf-some, #gradeFreeBody td.gf-part').forEach(function (td) {
     td.addEventListener('click', function () {
       openRaAssign(+td.dataset.day, +td.dataset.period, GF_UI.grade);
     });
   });
-  document.querySelectorAll('#gradeFreeBody td.gf-after').forEach(function (td) {
-    td.addEventListener('click', function () {
-      registerRegularSlot(GF_UI.grade, +td.dataset.day, +td.dataset.period);
-    });
-  });
-  document.querySelectorAll('#gradeFreeBody td.gf-reg').forEach(function (td) {
-    if (td.classList.contains('gf-all') || td.classList.contains('gf-some') || td.classList.contains('gf-part')) return;
-    td.addEventListener('click', function () {
-      unregisterRegularSlot(GF_UI.grade, +td.dataset.day, +td.dataset.period);
-    });
-  });
 }
-/* 공강 현황은 설정 모달의 탭이다 — 그 탭이 보일 때만 다시 그린다(조회 전용, DIRTY 아님). */
+/* 공강 현황은 설정 모달의 탭이다 — 그 탭이 보일 때만 다시 그린다(렌더는 DIRTY 아님). */
 function isGradeFreeOpen() { return isSettingsOpen() && SETTINGS_TAB === 'gradefree'; }
 function renderGradeFreeIfOpen() { if (isGradeFreeOpen()) renderGradeFree(); }
 
@@ -2674,21 +2768,11 @@ function renderRaAssign() {
     RA_UI.perClass = false;
     html += '<div class="ra-sec"><span class="muted">배정 가능한 반이 없습니다</span></div>';
   }
-  if (isRegularRegistered2(STATE.config, RA_UI.grade, RA_UI.day, RA_UI.period)) {
-    html += '<div class="ra-sec"><button type="button" class="ra-revert">방과후로 되돌리기</button></div>';
-  }
   document.getElementById('raAssignBody').innerHTML = html;
 }
 
 function onRaAssignBodyClick(ev) {
   var t = ev.target;
-  var rev = t.closest ? t.closest('.ra-revert') : null;
-  if (rev) {
-    var gg = RA_UI.grade, dd = RA_UI.day, pp = RA_UI.period;
-    closeRaAssign();
-    unregisterRegularSlot(gg, dd, pp);
-    return;
-  }
   var clr = t.closest ? t.closest('.ra-clear') : null;
   if (clr) { raClearCell(+clr.dataset.row, RA_UI.idx); return; }
   var tab = t.closest ? t.closest('.ra-classtab') : null;
@@ -2764,52 +2848,105 @@ function raClearCell(row, idx) {
     'RA 감독을 해제했습니다');
 }
 
-// 학년별 매트릭스 드래그 범위 칠하기 (mousedown→mouseover→mouseup 위임)
-function ghDragStart(ev) {
-  var td = ev.target.closest ? ev.target.closest('td.gh-cell') : null;
+/* =========================================================
+   금지 슬롯 칠하기 (공강 현황 탭 · 즉시 저장)
+   — 클릭/드래그 중에는 미리보기만, 마우스를 놓을 때 postConfig 를 딱 1회 호출한다.
+   ========================================================= */
+// 즉시 저장은 STATE.config 기준이라 DRAFT 에 미저장 변경이 있으면 두 값이 갈라진다 → 먼저 정리시킨다.
+function gfPaintGuard() {
+  if (!SETTINGS_DIRTY) return true;
+  alert('다른 탭에 저장하지 않은 변경이 있습니다.\n[저장]을 누르거나 설정을 닫았다 다시 연 뒤에 금지 슬롯을 칠해 주세요.');
+  return false;
+}
+function gfPaintable(ev) {
+  if (!isGradeFreeOpen() || GF_UI.mode !== 'paint') return null;
+  return (ev.target.closest && ev.target.closest('#gradeFreeBody td.gf-cell')) || null;
+}
+function gfPaintStart(ev) {
+  if (ev.button !== 0) return;
+  var td = gfPaintable(ev);
   if (!td) return;
   ev.preventDefault(); // 텍스트 선택 방지
+  if (!gfPaintGuard()) return;
   var day = parseInt(td.getAttribute('data-day'), 10);
   var period = parseInt(td.getAttribute('data-period'), 10);
-  var st = ghState(DRAFT.fixedBlocks, day, period, GH_UI.grade);
-  var action = (st === '불가') ? 'ERASE' : 'PAINT';
-  GH_DRAG = { action: action, cells: {} };
-  ghDragAdd(td, day, period);
+  var st = ghState(gfBlocks(), day, period, GF_UI.grade);
+  GF_PAINT = { action: (st === '불가') ? 'ERASE' : 'PAINT', cells: {} };
+  gfPaintAdd(td, day, period);
 }
-function ghDragAdd(td, day, period) {
+function gfPaintAdd(td, day, period) {
   var key = day + '_' + period;
-  if (GH_DRAG.cells[key]) return;
-  GH_DRAG.cells[key] = { day: day, period: period };
-  td.classList.add('gh-drag');
+  if (GF_PAINT.cells[key]) return;
+  GF_PAINT.cells[key] = { day: day, period: period };
+  td.classList.add(GF_PAINT.action === 'PAINT' ? 'gf-paint-on' : 'gf-paint-off');
 }
-function ghDragOver(ev) {
-  if (!GH_DRAG) return;
-  var td = ev.target.closest ? ev.target.closest('td.gh-cell') : null;
+function gfPaintOver(ev) {
+  if (!GF_PAINT) return;
+  var td = gfPaintable(ev);
   if (!td) return;
-  ghDragAdd(td, parseInt(td.getAttribute('data-day'), 10), parseInt(td.getAttribute('data-period'), 10));
+  gfPaintAdd(td, parseInt(td.getAttribute('data-day'), 10), parseInt(td.getAttribute('data-period'), 10));
 }
-// 매트릭스 밖으로 나가면 드래그 종료+적용
-function ghDragLeave(ev) {
-  if (!GH_DRAG) return;
+// 매트릭스 밖으로 나가면 드래그 종료 + 적용
+function gfPaintLeave(ev) {
+  if (!GF_PAINT) return;
   var to = ev.relatedTarget;
   if (to && to.closest && to.closest('table.gh-matrix')) return;
-  ghDragEnd();
+  gfPaintEnd();
 }
-function ghDragEnd() {
-  if (!GH_DRAG) return;
-  var d = GH_DRAG; GH_DRAG = null;
-  var g = GH_UI.grade, changed = false;
+function gfPaintEnd() {
+  if (!GF_PAINT) return;
+  var d = GF_PAINT; GF_PAINT = null;
+  var g = GF_UI.grade;
+  var blocks = gfBlocks();
+  var n = 0;
   Object.keys(d.cells).forEach(function (k) {
     var c = d.cells[k];
-    var st = ghState(DRAFT.fixedBlocks, c.day, c.period, g);
-    if (d.action === 'PAINT') {
-      if (st !== '불가') { ghToggle(DRAFT.fixedBlocks, c.day, c.period, g); changed = true; }
-    } else { // ERASE
-      if (st === '불가') { ghToggle(DRAFT.fixedBlocks, c.day, c.period, g); changed = true; }
+    var st = ghState(blocks, c.day, c.period, g);
+    if (d.action === 'PAINT') { if (st !== '불가') { ghToggle(blocks, c.day, c.period, g); n++; } }
+    else { if (st === '불가') { ghToggle(blocks, c.day, c.period, g); n++; } }
+  });
+  if (!n) { renderGradeFree(); return; }   // 바뀐 게 없으면 저장하지 않고 미리보기만 지운다
+  gfCommitBlocks(blocks, n, d.action);
+}
+// 머리글(요일/교시) 일괄 전환 — 8칸·5칸을 한 번에 바꾸므로 확인을 받는다.
+function gfBulkToggle(kind, val) {
+  if (!gfPaintGuard()) return;
+  var g = GF_UI.grade;
+  var blocks = gfBlocks();
+  var cells = [];
+  if (kind === 'day') { for (var p = 1; p <= 8; p++) cells.push({ day: val, period: p }); }
+  else { for (var dd = 0; dd < 5; dd++) cells.push({ day: dd, period: val }); }
+  var anyOpen = cells.some(function (c) { return ghState(blocks, c.day, c.period, g) !== '불가'; });
+  var label = (kind === 'day' ? DAYS[val] + '요일' : val + '교시');
+  var n = cells.filter(function (c) {
+    var st = ghState(blocks, c.day, c.period, g);
+    return anyOpen ? st !== '불가' : st === '불가';
+  }).length;
+  if (!n) return;
+  if (!confirm(g + '학년 ' + label + ' ' + n + '칸을 ' + (anyOpen ? '금지로 지정' : '금지 해제') + '할까요?\n즉시 저장됩니다.')) return;
+  cells.forEach(function (c) {
+    var st = ghState(blocks, c.day, c.period, g);
+    if (anyOpen ? st !== '불가' : st === '불가') ghToggle(blocks, c.day, c.period, g);
+  });
+  gfCommitBlocks(blocks, n, anyOpen ? 'PAINT' : 'ERASE');
+}
+// 한 번의 사용자 조작 = 한 번의 postConfig.
+// 저장 성공/실패와 무관하게 끝나면 DRAFT·화면을 STATE.config(=시트) 기준으로 다시 만든다
+// → 실패하면 미리보기가 사라지고 화면이 시트와 다시 일치한다.
+function gfCommitBlocks(blocks, n, action) {
+  if (!gfPaintGuard()) { renderGradeFree(); return; }
+  var cfg = cloneConfig(STATE.config);
+  cfg.fixedBlocks = blocksToConfig(blocks);
+  var before = JSON.stringify((STATE.config || {}).fixedBlocks || []);
+  postConfig(cfg).then(function () {
+    buildDraftFromConfig();
+    SETTINGS_DIRTY = false;   // 즉시 저장 경로는 미저장 변경을 남기지 않는다
+    renderSettings();
+    var after = JSON.stringify((STATE.config || {}).fixedBlocks || []);
+    if (after !== before) {
+      toast('금지 슬롯 ' + n + '칸을 ' + (action === 'PAINT' ? '지정' : '해제') + '했습니다 — 다시 칠하면 되돌릴 수 있습니다');
     }
   });
-  if (changed) SETTINGS_DIRTY = true;
-  renderSettings(); // 프리뷰 클래스 제거 겸 재렌더 (1회)
 }
 // 고정 수업 카드: 팀티칭 카드와 동일한 카드+칩 구조.
 // 슬롯 인덱스 = day*8 + (period-1) (pinnedMatrixHtml 과 동일 공식 유지).
@@ -2996,15 +3133,10 @@ function renderSettings() {
   Object.keys(blkCount).forEach(function (k) { if (blkCount[k] > 1) blkDup[k] = true; });
   var blkKey = function (idx) { var b = DRAFT.fixedBlocks[idx]; return b.day * 8 + (b.period - 1); };
   var blkOrder = DRAFT.fixedBlocks.map(function (b, i) { return i; }).sort(function (a, b) { return blkKey(a) - blkKey(b); });
-  html += '<div class="sec" data-tab="block"><h3>금지 슬롯 규칙 <span class="muted h-help">특정 요일·교시에 배정을 금지합니다. \'학년별 시간\' 탭에서 학년 관점의 매트릭스로도 편집할 수 있습니다.</span></h3>';
+  html += '<div class="sec" data-tab="block"><h3>금지 슬롯 규칙 <span class="muted h-help">특정 요일·교시에 배정을 금지합니다. 여기서 편집한 내용은 [저장]을 눌러야 반영됩니다. \'공강 현황\' 탭의 \'금지 슬롯 칠하기\' 모드에서 학년 관점으로 즉시 편집할 수도 있습니다.</span></h3>';
   html += '<div class="row"><button data-act="addBlock">+ 규칙 추가</button></div>';
-  if (!DRAFT.fixedBlocks.length) html += '<div class="muted">등록된 규칙이 없습니다. "+ 규칙 추가" 버튼 또는 \'학년별 시간\' 탭에서 추가하세요.</div>';
+  if (!DRAFT.fixedBlocks.length) html += '<div class="muted">등록된 규칙이 없습니다. "+ 규칙 추가" 버튼 또는 \'공강 현황\' 탭의 칠하기 모드에서 추가하세요.</div>';
   blkOrder.forEach(function (bi) { html += blockRowHtml(DRAFT.fixedBlocks[bi], bi, blkDup); });
-  html += '</div>';
-
-  // 학년별 시간 (같은 DRAFT.fixedBlocks 를 학년 관점 매트릭스로 편집)
-  html += '<div class="sec" data-tab="gradehours"><h3>학년별 시간 <span class="muted h-help">학년을 선택하고 칸을 클릭해 수업 가능/불가를 전환합니다. 금지 슬롯 규칙과 같은 데이터입니다.</span></h3>';
-  html += gradeMatrixHtml();
   html += '</div>';
 
   // ② 연결 그룹
@@ -3066,11 +3198,13 @@ function renderSettings() {
   DRAFT.pinned.forEach(function (pc, ci) { html += pinnedCardHtml(pc, ci, gridSet); });
   html += '</div>';
 
-  // 공강 현황 (조회 전용 — DRAFT 를 건드리지 않는다. 내용은 renderGradeFree 가 채운다)
-  html += '<div class="sec" data-tab="gradefree"><h3>학년별 공강 현황 <span class="muted h-help">조회 전용입니다. 공강 칸을 클릭하면 RA 감독을 배정하고, 방과후/정규 칸을 클릭하면 정규 수업시간 등록을 전환합니다.</span></h3>';
+  // 공강 현황 (DRAFT 를 건드리지 않는다 — 모든 조작이 즉시 저장. 내용은 renderGradeFree 가 채운다)
+  html += '<div class="sec" data-tab="gradefree"><h3>공강 현황 <span class="muted h-help">학년별 공강·금지 슬롯·RA 감독을 한 장에서 봅니다. 이 탭의 모든 조작은 [저장] 없이 즉시 반영됩니다.</span></h3>';
   html += '<div id="gradeFreeNote" class="muted"></div>';
+  html += '<div id="gradeFreeMode"></div>';
   html += '<div id="gradeFreeGrades" style="margin:8px 0"></div>';
   html += '<div id="gradeFreeBody"></div>';
+  html += '<div id="gradeFreeLegend"></div>';
   html += '</div>';
 
   var _sbody = document.getElementById('settingsBody');
@@ -3110,7 +3244,6 @@ function onSettingsClick(ev) {
   if (act === 'uvPick') { uvPick(i, el.getAttribute('data-name'), el.getAttribute('data-row')); return; }
   if (act === 'uvSlotPick') { uvToggleSlot(i, parseInt(el.getAttribute('data-idx'), 10)); return; }
   if (act === 'uvClearName') { uvClearName(i); return; }
-  if (act === 'ghGrade') { GH_UI.grade = parseInt(el.getAttribute('data-g'), 10); renderSettings(); return; }
   SETTINGS_DIRTY = true;
   if (act === 'delBlock') { DRAFT.fixedBlocks.splice(i, 1); renderSettings(); }
   else if (act === 'addBlock') {
@@ -3135,26 +3268,6 @@ function onSettingsClick(ev) {
       DRAFT.pinned = Object.keys(lp).map(function (k) { return { subject: k, slots: (lp[k] || []).slice() }; });
       renderSettings();
     }
-  }
-  else if (act === 'ghDay') {
-    var gd = parseInt(el.getAttribute('data-day'), 10);
-    var anyOpenD = false;
-    for (var gp = 1; gp <= 8; gp++) if (ghState(DRAFT.fixedBlocks, gd, gp, GH_UI.grade) !== '불가') anyOpenD = true;
-    for (var gp2 = 1; gp2 <= 8; gp2++) {
-      var sD = ghState(DRAFT.fixedBlocks, gd, gp2, GH_UI.grade);
-      if (anyOpenD ? sD !== '불가' : sD === '불가') ghToggle(DRAFT.fixedBlocks, gd, gp2, GH_UI.grade);
-    }
-    renderSettings();
-  }
-  else if (act === 'ghPeriod') {
-    var gpp = parseInt(el.getAttribute('data-period'), 10);
-    var anyOpenP = false;
-    for (var gdd = 0; gdd < 5; gdd++) if (ghState(DRAFT.fixedBlocks, gdd, gpp, GH_UI.grade) !== '불가') anyOpenP = true;
-    for (var gdd2 = 0; gdd2 < 5; gdd2++) {
-      var sP = ghState(DRAFT.fixedBlocks, gdd2, gpp, GH_UI.grade);
-      if (anyOpenP ? sP !== '불가' : sP === '불가') ghToggle(DRAFT.fixedBlocks, gdd2, gpp, GH_UI.grade);
-    }
-    renderSettings();
   }
 }
 
@@ -3205,9 +3318,11 @@ function importElectives() {
   toast('그룹 ' + added + '개 추가, ' + updated + '개 갱신');
 }
 
-function assembleConfig() {
+// 편집용 fixedBlocks → 저장 형태(grades: 'all' 축약, 빈 규칙 제거).
+// assembleConfig([저장] 경로)과 공강 현황 탭의 즉시 저장이 공유한다.
+function blocksToConfig(list) {
   var blocks = [];
-  DRAFT.fixedBlocks.forEach(function (b) {
+  (list || []).forEach(function (b) {
     var gArr = (b.grades === 'all') ? [7, 8, 9, 10, 11, 12] : (b.grades || []).slice();
     var isAll = [7, 8, 9, 10, 11, 12].every(function (g) { return gArr.indexOf(g) !== -1; });
     var partialGrades = (b.partialGrades || []).slice().filter(function (g) { return isAll ? false : gArr.indexOf(g) === -1; });
@@ -3223,6 +3338,11 @@ function assembleConfig() {
     if (!hasTarget && !label) return; // 대상·라벨 모두 비면 제외
     blocks.push({ day: b.day, period: b.period, label: label, grades: grades, classes: classes, partialGrades: partialGrades });
   });
+  return blocks;
+}
+
+function assembleConfig() {
+  var blocks = blocksToConfig(DRAFT.fixedBlocks);
   var config = { fixedBlocks: blocks, linkedGroups: {}, classless: {}, teamTeaching: {} };
   DRAFT.groups.forEach(function (g) {
     var n = (g.name || '').trim();
@@ -3309,10 +3429,10 @@ window.addEventListener('load', function () {
   body.addEventListener('click', onSettingsClick);
   body.addEventListener('input', onSettingsInput);
   body.addEventListener('change', onSettingsChange);
-  body.addEventListener('mousedown', ghDragStart);
-  body.addEventListener('mouseover', ghDragOver);
-  body.addEventListener('mouseout', ghDragLeave);
-  document.addEventListener('mouseup', ghDragEnd);
+  body.addEventListener('mousedown', gfPaintStart);
+  body.addEventListener('mouseover', gfPaintOver);
+  body.addEventListener('mouseout', gfPaintLeave);
+  document.addEventListener('mouseup', gfPaintEnd);
   document.getElementById('btnCloseSettings').addEventListener('click', closeSettings);
   document.getElementById('btnSaveSettings').addEventListener('click', saveSettings);
   document.getElementById('settingsTabs').addEventListener('click', function (ev) {

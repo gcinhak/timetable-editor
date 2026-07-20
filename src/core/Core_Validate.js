@@ -368,41 +368,6 @@ function pinnedMoveConflicts(model, config, moves) {
   return conflicts;
 }
 
-// 방과후 교시(7·8교시) 이동 차단: 목적지가 7·8교시인 이동에 대해, 이동 과목의 대상 학년 중
-// 하나라도 config.regularSlots 에 (grade, day, period) 미등록이면 차단. 미분류/RA(대상 학년 없음)는 제외.
-// 이동으로 새로 배치되는 셀에만 적용(move 기반) → 델타에서 preexisting 자동 제외.
-function afterSchoolMoveConflicts(model, config, moves) {
-  var reg = (config && config.regularSlots) || [];
-  function isRegular(g, day, period) {
-    for (var i = 0; i < reg.length; i++) {
-      if (reg[i].grade === g && reg[i].day === day && reg[i].period === period) return true;
-    }
-    return false;
-  }
-  var conflicts = [];
-  (moves || []).forEach(function (mv) {
-    var period = (mv.toIdx % 8) + 1;
-    if (period < 7) return;              // 7·8교시만
-    var e = resolveEntry(model, mv);
-    if (!e) return;
-    var subj = e.slots[mv.fromIdx];
-    if (!subj) return;
-    var tg = expandTargets(subj, config);
-    // 대상 학년 수집(반 파싱 + classless 'N일부' partialGrades). RA/미분류는 학년 없음 → 제외.
-    var grades = [];
-    tg.classes.forEach(function (c) { if (grades.indexOf(c.grade) === -1) grades.push(c.grade); });
-    (tg.partialGrades || []).forEach(function (g) { if (grades.indexOf(g) === -1) grades.push(g); });
-    if (grades.length === 0) return;     // 미분류/RA → 차단 안 함
-    var day = Math.floor(mv.toIdx / 8);
-    var unreg = grades.filter(function (g) { return !isRegular(g, day, period); });
-    if (unreg.length === 0) return;      // 모든 대상 학년 등록 → 허용
-    conflicts.push({ type: 'afterSchool', severity: 'block', slot: mv.toIdx, label: _slotLabel(mv.toIdx),
-      names: [mv.name], subject: subj, grades: unreg,
-      message: '방과후 교시 이동 불가 — ' + unreg.map(function (g) { return g + '학년 ' + _slotLabel(mv.toIdx); }).join(', ') + '은 정규 수업시간으로 등록되지 않음' });
-  });
-  return conflicts;
-}
-
 // 연산 검사: 교사 중복(사전) + 교사불가(사전) + 적용 후 영향 슬롯의 학급/고정/미분류 충돌
 function checkMoves(model, config, moves) {
   var dup = teacherDupConflicts(model, moves);
@@ -410,7 +375,7 @@ function checkMoves(model, config, moves) {
   var affected = {};
   moves.forEach(function (mv) { affected[mv.fromIdx] = true; affected[mv.toIdx] = true; });
   var others = findConflicts(next, config, Object.keys(affected).map(Number));
-  return dup.concat(others).concat(unavailableMoveConflicts(model, config, moves)).concat(pinnedMoveConflicts(model, config, moves)).concat(afterSchoolMoveConflicts(model, config, moves));
+  return dup.concat(others).concat(unavailableMoveConflicts(model, config, moves)).concat(pinnedMoveConflicts(model, config, moves));
 }
 
 // 충돌 정규화 키: 타입 + 슬롯 + 정렬된 관련 교사/학급 조합. 이동 전후 동일 충돌은 같은 키.
@@ -427,7 +392,7 @@ function checkMovesDelta(model, config, moves) {
   var slots = Object.keys(affected).map(Number);
   var before = findConflicts(model, config, slots);
   var next = applyMoves(model, moves);
-  var after = teacherDupConflicts(model, moves).concat(unavailableMoveConflicts(model, config, moves)).concat(pinnedMoveConflicts(model, config, moves)).concat(afterSchoolMoveConflicts(model, config, moves)).concat(findConflicts(next, config, slots));
+  var after = teacherDupConflicts(model, moves).concat(unavailableMoveConflicts(model, config, moves)).concat(pinnedMoveConflicts(model, config, moves)).concat(findConflicts(next, config, slots));
   var beforeKeys = {};
   before.forEach(function (c) { beforeKeys[conflictKey(c)] = true; });
   var blocks = [];
@@ -457,6 +422,5 @@ if (typeof module !== 'undefined') {
     teacherDupConflicts: teacherDupConflicts, checkMoves: checkMoves, checkMovesDelta: checkMovesDelta, conflictKey: conflictKey, hasBlock: hasBlock,
     isUnavailable: isUnavailable, unavailableMoveConflicts: unavailableMoveConflicts,
     pinnedMoveConflicts: pinnedMoveConflicts,
-    afterSchoolMoveConflicts: afterSchoolMoveConflicts,
   };
 }

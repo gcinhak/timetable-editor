@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { slotColLetter, cellsToBatchData, hashGrid, hashValues, lastDataRow, parseLinkedGroups, deriveClasslessFromGrades, detectLayout, normalizeGrid, colLetter, makeSheetsFetch, resolveSheetId, sheetsErrorStatus, mapSheetsError, overwriteSheetRange, padRows } from '../src/lib/sheets.js';
 import { signJwtRS256, verifyIdToken } from '../src/lib/google-auth.js';
-import { readConfigSafe, readConfigWithVersion, resolveApplyTab, nonTeacherRows, incompleteUnits, historyKindLabel, deptBoundaries, parseDepts, gradeSlotState, toggleGradeSlot, gradeFreeState, assignCandidates, raOpError, isRaValue, RA_VALUE_RE, raFreeCellLabel } from '../src/lib/state.js';
+import { readConfigSafe, readConfigWithVersion, resolveApplyTab, nonTeacherRows, incompleteUnits, historyKindLabel, deptBoundaries, parseDepts, gradeSlotState, toggleGradeSlot, gradeFreeState, assignCandidates, raOpError, isRaValue, RA_VALUE_RE, raFreeCellLabel, subjectGradeTargets, gradeSubjectIndex } from '../src/lib/state.js';
 import { getMockStore, resetMockStore, mockPickTab, applyCellsToGrid, mockDuplicateTab, mockSaveConfig, mockListTabs } from '../src/dev/mock_store.js';
 
 // 코어(CJS 가드형)를 worker/브라우저와 동일하게 텍스트 연결 → new Function 로드.
@@ -32,6 +32,17 @@ function check(desc, cond) {
   if (!cond) failures.push(desc);
 }
 function eq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+// index.html 안의 함수 하나를 중괄호 매칭으로 잘라낸다(브라우저 코드를 new Function 으로 로드하기 위함)
+function fnSrc(html, name) {
+  const start = html.indexOf('function ' + name + '(');
+  if (start === -1) throw new Error('함수를 찾지 못함: ' + name);
+  let depth = 0;
+  for (let i = html.indexOf('{', start); i < html.length; i++) {
+    if (html[i] === '{') depth++;
+    else if (html[i] === '}') { depth--; if (depth === 0) return html.slice(start, i + 1); }
+  }
+  throw new Error('중괄호 불일치: ' + name);
+}
 async function expectFail(desc, promise, code, status) {
   try {
     await promise;
@@ -87,7 +98,7 @@ async function expectFail(desc, promise, code, status) {
 }
 
 /* =========================================================
-   1c. [정규교시] 블록 파싱/직렬화 왕복 + gradeFreeState 판정
+   1c. [정규교시] 블록 파싱/직렬화 왕복 (규칙 제거 후에도 시트 내용 보존)
    ========================================================= */
 {
   const serializeConfig = CORE.serializeConfig;
@@ -105,13 +116,15 @@ async function expectFail(desc, promise, code, status) {
   const back = parseConfig(serializeConfig(cfg));
   check('정규교시 왕복 regularSlots 동일', eq(back.regularSlots, cfg.regularSlots));
   check('정규교시 왕복 rawExtras 보존', eq(back.rawExtras['[정규교시]'], cfg.rawExtras['[정규교시]']));
-  // gradeFreeState: 등록 슬롯은 일반 판정, 미등록은 after
+  // 7·8교시 특별취급 없음: 등록/미등록과 무관하게 일반 판정
   const model0 = { entries: [] };
-  const gf8 = gradeFreeState(model0, cfg, 8, { day: 4, period: 7 });
-  check('8학년 금7(등록) → after 아님', gf8.kind !== 'after');
-  check('8학년 금7(등록) → 일반판정(all/some/partial/none/busy 등)', gf8.kind === 'all');
-  const gf7 = gradeFreeState(model0, cfg, 7, { day: 4, period: 7 });
-  check('7학년 금7(미등록) → after', gf7.kind === 'after');
+  check('8학년 금7 → 일반 판정', gradeFreeState(model0, cfg, 8, { day: 4, period: 7 }).kind === 'all');
+  check('7학년 금7 → 일반 판정(동일)', gradeFreeState(model0, cfg, 7, { day: 4, period: 7 }).kind === 'all');
+  // 직렬화 원문 보존: [정규교시] 블록의 유효행·실패행이 모두 다시 써진다
+  const rows = serializeConfig(cfg).map(function (r) { return r.join('|'); });
+  check('직렬화에 [정규교시] 블록 유지', rows.indexOf('[정규교시]') !== -1);
+  check('직렬화에 유효행 8|금|7 유지', rows.indexOf('8|금|7') !== -1);
+  check('직렬화에 실패행 8|금|9 유지', rows.indexOf('8|금|9') !== -1);
   // busy 판정도 정상 동작: 8학년 금7 슬롯(idx 4*8+6=38)에 Kor8A 배정 → 8A busy
   const modelBusy = { entries: [{ slots: (function () { var a = []; a[38] = 'Kor8A'; return a; })() }] };
   const gfb = gradeFreeState(modelBusy, cfg, 8, { day: 4, period: 7 });
@@ -931,17 +944,17 @@ await (async function () {
   var rBoff = gradeFreeState(gfModel([]), cfgCoun, 10, { day: 0, period: 1 });
   check("gradeFree 전체금지 → 타 슬롯 무영향(전체 공강)", rBoff.kind === 'all');
 
-  // fixedBlocks 학년 지정 금지: grades:[7,8,9] → 7학년 blocked, 10학년 정상 (7교시↑는 방과후라 6교시 사용)
+  // fixedBlocks 학년 지정 금지: grades:[7,8,9] → 7학년 blocked, 10학년 정상
   var cfgSA = { fixedBlocks: [{ day: 1, period: 6, label: 'S.A', grades: [7, 8, 9], classes: [], partialGrades: [] }] };
   var rSA7 = gradeFreeState(gfModel([]), cfgSA, 7, { day: 1, period: 6 });
   check("gradeFree 학년지정금지 → 7학년 blocked", rSA7.kind === 'blocked' && rSA7.label === 'S.A');
   var rSA10 = gradeFreeState(gfModel([]), cfgSA, 10, { day: 1, period: 6 });
   check("gradeFree 학년지정금지 → 미포함 학년 정상(전체)", rSA10.kind === 'all');
 
-  // 7·8교시 방과후: period 7 → 금지 규칙이 있어도 kind 'after'/label '방과후' 우선
+  // 7·8교시도 다른 교시와 동일 취급: 금지 규칙이 그대로 적용된다
   var cfgAfter = { fixedBlocks: [{ day: 1, period: 7, label: 'S.A', grades: [7, 8, 9], classes: [], partialGrades: [] }] };
   var rAfter7 = gradeFreeState(gfModel([]), cfgAfter, 7, { day: 1, period: 7 });
-  check("gradeFree 7교시 → 방과후 after 우선", rAfter7.kind === 'after' && rAfter7.label === '방과후');
+  check("gradeFree 7교시 → 금지 규칙 적용(blocked)", rAfter7.kind === 'blocked' && rAfter7.label === 'S.A');
   var rAfter6 = gradeFreeState(gfModel([]), cfgAfter, 7, { day: 1, period: 6 });
   check("gradeFree 6교시 → 기존 판정 정상(전체 공강)", rAfter6.kind === 'all' && rAfter6.label === '전체');
 
@@ -959,6 +972,123 @@ await (async function () {
   check("gradeFree partialGrades 무영향 → 여전히 일부/partial", rPG.kind === 'partial' && rPG.label === '일부');
   var rPGempty = gradeFreeState(gfModel([]), cfgPG, 12, { day: 0, period: 5 });
   check("gradeFree partialGrades 무영향 → 규칙만으론 전체 공강", rPGempty.kind === 'all');
+}
+
+/* =========================================================
+   15c. 공강 현황 매트릭스의 과목 표시 (subjectGradeTargets / gradeSubjectIndex)
+   ========================================================= */
+{
+  function sEntry(slotMap) {
+    var slots = Array(40).fill('');
+    Object.keys(slotMap).forEach(function (k) { slots[parseInt(k, 10)] = slotMap[k]; });
+    return { name: 'T', room: '', type: 'teacher', row: 3, slots: slots };
+  }
+  function sModel(entries) { return { entries: entries }; }
+
+  // --- subjectGradeTargets: 학년 매칭 ---
+  check('subjTargets 과목명 파싱 → 해당 학년 반',
+    eq(subjectGradeTargets('PEng7A', 7, {}), { classes: ['7A'], partial: false }));
+  check('subjTargets 다른 학년 → null', subjectGradeTargets('PEng7A', 10, {}) === null);
+  check('subjTargets 10 vs 1 오인 없음(Eng10B 는 10학년)',
+    eq(subjectGradeTargets('Eng10B', 10, {}), { classes: ['10B'], partial: false }));
+  check('subjTargets 파싱되면 무반 매핑 무시',
+    eq(subjectGradeTargets('Eng10B', 10, { 'Eng10B': ['12전체'] }), { classes: ['10B'], partial: false }));
+  check('subjTargets 무반 G전체 → 세 반',
+    eq(subjectGradeTargets('CHAPEL', 9, { 'CHAPEL': ['9전체'] }), { classes: ['9A', '9B', '9C'], partial: false }));
+  check('subjTargets 무반 반토큰 → 해당 반만',
+    eq(subjectGradeTargets('무반X', 10, { '무반X': ['10A', '10C', '11B'] }), { classes: ['10A', '10C'], partial: false }));
+  check('subjTargets 무반 G일부 → partial',
+    eq(subjectGradeTargets('AP Statistics', 12, { 'AP Statistics': ['12일부'] }), { classes: [], partial: true }));
+  check('subjTargets 대상없음([]) → null', subjectGradeTargets('JMA', 12, { 'JMA': [] }) === null);
+  check('subjTargets 미분류(매핑없음) → null', subjectGradeTargets('Unknown', 10, {}) === null);
+  check('subjTargets RA 값은 수업 아님', subjectGradeTargets('RA11B', 11, {}) === null);
+  check('subjTargets 빈 값 → null', subjectGradeTargets('', 10, {}) === null && subjectGradeTargets(null, 10, {}) === null);
+
+  // --- gradeSubjectIndex: 슬롯별 수집 ---
+  // 월1(idx 0)에 7학년 세 과목 + 다른 학년 과목 1개
+  var mIdx = gradeSubjectIndex(sModel([
+    sEntry({ 0: 'PEng7A' }), sEntry({ 0: 'TKD7B' }), sEntry({ 0: 'Eng7C' }), sEntry({ 0: 'Alge10A' }),
+  ]), {}, 7);
+  check('subjIndex 월1 7학년 → 세 과목만', eq(mIdx[0], ['PEng7A', 'TKD7B', 'Eng7C']));
+  check('subjIndex 길이 40 · 빈 슬롯은 빈 배열', mIdx.length === 40 && eq(mIdx[1], []));
+  var mIdx10 = gradeSubjectIndex(sModel([
+    sEntry({ 0: 'PEng7A' }), sEntry({ 0: 'Alge10A' }),
+  ]), {}, 10);
+  check('subjIndex 학년 전환 → 그 학년 과목만', eq(mIdx10[0], ['Alge10A']));
+
+  // 팀티칭: 같은 과목이 두 교사에게 → 중복 제거
+  var mTeam = gradeSubjectIndex(sModel([
+    sEntry({ 5: 'PreCal11A' }), sEntry({ 5: 'PreCal11A' }), sEntry({ 5: 'Kor11B' }),
+  ]), {}, 11);
+  check('subjIndex 팀티칭 중복 제거', eq(mTeam[5], ['PreCal11A', 'Kor11B']));
+
+  // 무반 과목: classless 매핑을 통해 학년 판정 (공강 판정과 같은 규칙)
+  var clsCfg = { classless: { 'CHAPEL': ['9전체'], 'AP Statistics': ['12일부'], 'JMA': [] } };
+  var mCls = gradeSubjectIndex(sModel([sEntry({ 18: 'CHAPEL', 19: 'AP Statistics', 20: 'JMA' })]), clsCfg, 9);
+  check('subjIndex 무반 G전체 포함', eq(mCls[18], ['CHAPEL']));
+  check('subjIndex 무반 대상없음 제외', eq(mCls[20], []));
+  var mCls12 = gradeSubjectIndex(sModel([sEntry({ 18: 'CHAPEL', 19: 'AP Statistics' })]), clsCfg, 12);
+  check('subjIndex G일부 매핑도 표시 대상', eq(mCls12[19], ['AP Statistics']));
+  check('subjIndex 타 학년 무반 과목 제외', eq(mCls12[18], []));
+
+  // RA 감독 값은 수업이 아니다 → 목록에서 제외(공강 셀에 RA 가 과목처럼 보이면 안 됨)
+  var mRa = gradeSubjectIndex(sModel([sEntry({ 0: 'RA11B' }), sEntry({ 0: 'RA' }), sEntry({ 0: 'Kor11A' })]), {}, 11);
+  check('subjIndex RA 값 제외', eq(mRa[0], ['Kor11A']));
+
+  // 인덱스 결과와 gradeFreeState 의 cover 가 어긋나지 않는다(같은 판정 로직 재사용)
+  var coverModel = sModel([sEntry({ 0: 'Eng10A' }), sEntry({ 0: 'Eng10B' })]);
+  var coverIdx = gradeSubjectIndex(coverModel, {}, 10);
+  var coverGf = gradeFreeState(coverModel, {}, 10, { day: 0, period: 1 });
+  check('subjIndex 와 gradeFreeState.cover 일치',
+    eq(coverIdx[0].slice().sort(), [].concat(coverGf.cover['10A'], coverGf.cover['10B'], coverGf.cover['10C']).sort()));
+}
+
+/* =========================================================
+   15d. 공강 현황 셀 렌더(index.html gradeFreeCellHtml) — 과목 표시·이스케이프
+   ========================================================= */
+{
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const src = fnSrc(html, 'gradeFreeCellHtml') + '\n' + fnSrc(html, 'gfClickHint') + '\n'
+    + fnSrc(html, 'gradeFreeState') + '\n' + fnSrc(html, 'subjectGradeTargets') + '\n'
+    + fnSrc(html, 'gradeSubjectIndex') + '\n' + fnSrc(html, 'raFreeCellLabel') + '\n'
+    + fnSrc(html, 'ghState') + '\n' + fnSrc(html, 'ghPartClasses') + '\n'
+    + fnSrc(html, 'esc');
+  const cell = new Function('STATE', 'RA_VALUE_RE', 'isRaValue', 'raSupBreakdownAt', 'GF_SUBJECT_RE2', 'SLOT_COUNT', 'GF_SUBJ_MAX',
+    src + '\nreturn gradeFreeCellHtml;')(
+      { model: { entries: [] }, config: {} }, RA_VALUE_RE, isRaValue,
+      function () {   // raSupBreakdownAt 스텁: 감독 없음(반별 빈 배열)
+        var bc = {};
+        [7, 8, 9, 10, 11, 12].forEach(function (g) { ['A', 'B', 'C'].forEach(function (c) { bc[g + c] = []; }); });
+        return { byClass: bc, gradeSups: [], pure: [] };
+      },
+      /^(.+?)(7|8|9|10|11|12)([A-C])$/, 40, 4);
+
+  const h = cell(7, 0, 1, [], false, ['PEng7A', 'TKD7B', 'Eng7C']);
+  check('셀 렌더: 상태 줄과 과목 줄이 분리됨', h.indexOf('<div class="gf-st">') !== -1 && h.indexOf('<div class="gf-subj">') !== -1);
+  check('셀 렌더: 과목이 줄바꿈되도록 각각 span', h.indexOf('<span>PEng7A</span><span>TKD7B</span><span>Eng7C</span>') !== -1);
+  check('셀 렌더: 공강 상태 텍스트 유지', h.indexOf('전체') !== -1);
+  check('셀 렌더: 과목 전체가 툴팁에도', h.indexOf('PEng7A / TKD7B / Eng7C') !== -1);
+
+  // 과목 없는 칸은 과목 블록 자체가 없다(빈 점선이 남으면 안 됨)
+  check('셀 렌더: 과목 없으면 과목 줄 없음', cell(7, 0, 1, [], false, []).indexOf('gf-subj') === -1);
+
+  // 5개 이상 → 앞의 4개 + '+N'
+  const hMany = cell(7, 0, 1, [], false, ['A7A', 'B7A', 'C7A', 'D7A', 'E7A', 'F7A']);
+  check('셀 렌더: 최대 4개 표시 + 나머지 +N', hMany.indexOf('<span class="gf-more">+2</span>') !== -1 && hMany.indexOf('E7A</span>') === -1);
+  check('셀 렌더: 접힌 과목도 툴팁에는 전부', hMany.indexOf('E7A') !== -1 && hMany.indexOf('F7A') !== -1);
+
+  // 칠하기 모드에서는 과목을 숨긴다(칸 판독 방해 방지)
+  check('셀 렌더: 칠하기 모드는 과목 숨김', cell(7, 0, 1, [], true, ['PEng7A']).indexOf('gf-subj') === -1);
+
+  // 과목명은 사용자 데이터 → HTML 이스케이프
+  const hEsc = cell(7, 0, 1, [], false, ['<img src=x onerror=alert(1)>7A']);
+  check('셀 렌더: 과목명 HTML 이스케이프', hEsc.indexOf('<img') === -1 && hEsc.indexOf('&lt;img') !== -1);
+
+  // 금지 슬롯: '금지' 표기를 유지하면서 편성된 과목도 함께 보인다(이상 신호)
+  const blocks = [{ day: 0, period: 1, label: '회의', grades: [7], partialGrades: [], classes: [] }];
+  const hNogo = cell(7, 0, 1, blocks, false, ['PEng7A']);
+  check('셀 렌더: 금지 슬롯도 라벨 + 과목 병기',
+    hNogo.indexOf('gf-nogo') !== -1 && hNogo.indexOf('회의') !== -1 && hNogo.indexOf('<span>PEng7A</span>') !== -1);
 }
 
 /* =========================================================
@@ -1328,7 +1458,7 @@ await (async function () {
 }
 
 /* =========================================================
-   방과후 교시(7·8교시) 이동 차단 (afterSchoolMoveConflicts)
+   7·8교시 무제약 이동 (교시 특별취급 제거 후)
    ========================================================= */
 {
   function dataRow(name, slotMap) {
@@ -1337,45 +1467,13 @@ await (async function () {
     return r;
   }
   const FRI7 = 38; // 금7 = 4*8 + (7-1)
-
-  // (a) 반 대상 과목(Alge8A → 8학년)을 미등록 금7로 이동 → checkMoves/checkMovesDelta afterSchool block
   const mA = CORE.buildModel([dataRow('교사A', { 0: 'Alge8A' })], 3);
-  const cfgA = { regularSlots: [] };
   const moveA = [{ name: '교사A', row: 3, fromIdx: 0, toIdx: FRI7 }];
-  check('(a) checkMoves afterSchool block',
-    CORE.checkMoves(mA, cfgA, moveA).some((c) => c.type === 'afterSchool' && c.severity === 'block'));
-  check('(a) checkMovesDelta afterSchool block',
-    CORE.checkMovesDelta(mA, cfgA, moveA).blocks.some((c) => c.type === 'afterSchool' && c.slot === FRI7));
-
-  // (b) {grade:8, day:4, period:7} 등록 후 동일 이동 → afterSchool 없음
-  const cfgB = { regularSlots: [{ grade: 8, day: 4, period: 7 }] };
-  check('(b) 등록 후 checkMoves afterSchool 없음',
-    !CORE.checkMoves(mA, cfgB, moveA).some((c) => c.type === 'afterSchool'));
-  check('(b) 등록 후 델타 afterSchool 없음',
-    CORE.checkMovesDelta(mA, cfgB, moveA).blocks.every((c) => c.type !== 'afterSchool'));
-
-  // (c) 두 학년(10,11) 대상 무반 과목: 한 학년만 등록 → block, 둘 다 등록 → 허용
-  const mC = CORE.buildModel([dataRow('교사C', { 0: 'MultiElec' })], 3);
-  const moveC = [{ name: '교사C', row: 3, fromIdx: 0, toIdx: FRI7 }];
-  const cfgC1 = { classless: { 'MultiElec': ['10A', '11A'] }, regularSlots: [{ grade: 10, day: 4, period: 7 }] };
-  check('(c) 10만 등록 → 11학년 block',
-    CORE.checkMoves(mC, cfgC1, moveC).some((c) => c.type === 'afterSchool' && c.severity === 'block' && c.grades.indexOf(11) !== -1));
-  const cfgC2 = { classless: { 'MultiElec': ['10A', '11A'] }, regularSlots: [{ grade: 10, day: 4, period: 7 }, { grade: 11, day: 4, period: 7 }] };
-  check('(c) 10·11 모두 등록 → 허용',
-    !CORE.checkMoves(mC, cfgC2, moveC).some((c) => c.type === 'afterSchool'));
-
-  // (d) 미분류 과목(매핑 없음·파싱 불가) 7·8교시 이동 → afterSchool block 없음
-  const mD = CORE.buildModel([dataRow('교사D', { 0: 'Drawing' })], 3);
-  check('(d) 미분류 과목 afterSchool 없음',
-    !CORE.checkMoves(mD, { regularSlots: [] }, [{ name: '교사D', row: 3, fromIdx: 0, toIdx: FRI7 }]).some((c) => c.type === 'afterSchool'));
-
-  // (e) 델타: 원래 7·8교시에 있던 과목을 다른(비방과후) 슬롯으로 이동 → 신규 afterSchool 없음
-  const mE = CORE.buildModel([dataRow('교사E', { 38: 'Alge8A' })], 3);
-  const moveE = [{ name: '교사E', row: 3, fromIdx: 38, toIdx: 0 }];
-  check('(e) 7·8교시 이탈 이동 → 신규 afterSchool 없음',
-    CORE.checkMovesDelta(mE, { regularSlots: [] }, moveE).blocks.every((c) => c.type !== 'afterSchool'));
-  check('(e) checkMoves 도 afterSchool 없음',
-    !CORE.checkMoves(mE, { regularSlots: [] }, moveE).some((c) => c.type === 'afterSchool'));
+  check('7교시 이동 block 없음', !CORE.hasBlock(CORE.checkMoves(mA, {}, moveA)));
+  check('7교시 이동 델타 block 없음', CORE.checkMovesDelta(mA, {}, moveA).blocks.length === 0);
+  // 대체 수단: 금지 슬롯([고정블록])을 지정하면 정상 차단
+  const cfgB = { fixedBlocks: [{ day: 4, period: 7, label: '자치모임', grades: [8], classes: [], partialGrades: [] }] };
+  check('금지 슬롯 지정 시 7교시 이동 차단', CORE.hasBlock(CORE.checkMoves(mA, cfgB, moveA)));
 }
 
 /* =========================================================
@@ -1384,13 +1482,7 @@ await (async function () {
 {
   // index.html 안의 assembleConfig 소스를 중괄호 매칭으로 추출 → new Function 으로 로드
   const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
-  const start = html.indexOf('function assembleConfig()');
-  let depth = 0, end = -1;
-  for (let i = html.indexOf('{', start); i < html.length; i++) {
-    if (html[i] === '{') depth++;
-    else if (html[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
-  }
-  const src = html.slice(start, end);
+  const src = fnSrc(html, 'blocksToConfig') + '\n' + fnSrc(html, 'assembleConfig');
   const runAssemble = new Function('DRAFT', 'STATE', src + '\nreturn assembleConfig();');
 
   const DRAFT = { fixedBlocks: [], groups: [], classless: {}, team: [], unavailable: [], pinned: [] };
@@ -2204,7 +2296,7 @@ await (async function () {
   check('슬롯 금지 팝업(slotPop) 잔재 없음', !/slotPop|SlotPopup|saveSlotBlock|removeSlotBlock/.test(html));
   // 안내 문구가 사라진 '설정 모드'를 더 이상 가리키지 않는다
   const blockSecStart = html.indexOf('data-tab="block"><h3>금지 슬롯 규칙');
-  const blockSec = html.slice(blockSecStart, html.indexOf('data-tab="gradehours"><h3>', blockSecStart));
+  const blockSec = html.slice(blockSecStart, html.indexOf('data-tab="group"><h3>', blockSecStart));
   check('금지 슬롯 안내 문구에서 설정 모드 언급 제거', blockSec.length > 0 && !/설정 모드/.test(blockSec));
 
   // (2) RA행: 체크박스가 아니라 '불가 시간'과 같은 모드 버튼
@@ -2233,8 +2325,8 @@ await (async function () {
   check('공강 현황 독립 모달 제거', !/id="gradeFree"|btnGradeFree|btnCloseGradeFree|openGradeFree|closeGradeFree/.test(html));
   const tabbar = html.slice(html.indexOf('<div id="settingsTabs"'), html.indexOf('<div id="settingsBody">'));
   const tabs = tabbar.match(/data-tab="([a-z]+)"/g) || [];
-  check('설정 탭이 8개', tabs.length === 8);
-  check('공강 현황 탭이 마지막', tabs[7] === 'data-tab="gradefree"' && /공강 현황<\/button>/.test(tabbar));
+  check('설정 탭이 7개(학년별 시간 흡수)', tabs.length === 7);
+  check('공강 현황 탭이 마지막', tabs[6] === 'data-tab="gradefree"' && /공강 현황<\/button>/.test(tabbar));
   check('공강 현황 섹션이 설정 본문에 렌더됨', /class="sec" data-tab="gradefree"/.test(html)
     && /id="gradeFreeNote"/.test(html) && /id="gradeFreeGrades"/.test(html) && /id="gradeFreeBody"/.test(html));
   // 조회 전용 탭에서는 [저장] 푸터를 숨긴다
@@ -2242,7 +2334,7 @@ await (async function () {
     /getElementById\('settingsFooter'\)\.style\.display = \(SETTINGS_TAB === 'gradefree'\) \? 'none' : ''/.test(html));
   // 보기만 해도 dirty 가 되면 안 된다 — 렌더 경로에 SETTINGS_DIRTY 대입이 없다
   const gfRender = html.slice(html.indexOf('function renderGradeFree()'), html.indexOf('function isGradeFreeOpen()'));
-  check('공강 현황 렌더가 SETTINGS_DIRTY 를 건드리지 않음', gfRender.length > 0 && !/SETTINGS_DIRTY/.test(gfRender));
+  check('공강 현황 렌더가 SETTINGS_DIRTY 를 켜지 않음', gfRender.length > 0 && !/SETTINGS_DIRTY = /.test(gfRender));
   check('공강 현황 열림 판정이 설정 탭 기준', /SETTINGS_TAB === 'gradefree'/.test(html)
     && /function isGradeFreeOpen\(\) \{ return isSettingsOpen\(\) && SETTINGS_TAB === 'gradefree'; \}/.test(html));
   check('탭 전환 시 공강 현황 재렌더', /applySettingsTab\(\);\n  renderGradeFreeIfOpen\(\);/.test(html));
@@ -2254,6 +2346,93 @@ await (async function () {
   // 그리드의 공강 행에서 들어가는 RA 배정 경로는 그대로 살아 있다
   check('그리드 공강 행 → RA 배정 경로 유지', /td\.gfr-all,td\.gfr-some,td\.gfr-partial/.test(html)
     && /openRaAssign\(\+td\.dataset\.day, \+td\.dataset\.period, \+td\.dataset\.grade\)/.test(html));
+})();
+
+/* =========================================================
+   '학년별 시간' + '공강 현황' 통합 탭 (index.html 정적 검증)
+   — 즉시 저장 / 드래그 1회 저장 / 실패 복구 / SETTINGS_DIRTY 무오염 / 모드 분리
+   ========================================================= */
+(function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+
+  // (1) 학년별 시간 탭은 흔적 없이 사라졌다
+  check('gradehours 탭/섹션 제거', !/gradehours/.test(html));
+  check('학년별 시간 전용 렌더 제거', !/gradeMatrixHtml|GH_UI|GH_DRAG/.test(html));
+  check('학년별 시간 전용 클릭 액션 제거', !/'ghGrade'|'ghDay'|'ghPeriod'/.test(html));
+  // 공용 규칙 연산(ghState/ghToggle/ghPartClasses)은 통합 탭이 이어받아 계속 쓴다
+  check('금지 슬롯 토글 로직은 유지', /function ghState\(/.test(html)
+    && /function ghToggle\(/.test(html) && /function ghPartClasses\(/.test(html));
+
+  // (2) 통합 탭 UI: 모드 전환 + 범례
+  check('공강 현황 탭에 모드 전환 바', /id="gradeFreeMode"/.test(html)
+    && /data-gfmode="view"/.test(html) && /data-gfmode="paint"/.test(html));
+  check('공강 현황 탭에 범례', /id="gradeFreeLegend"/.test(html) && /function gradeFreeLegendHtml\(/.test(html));
+  check('기본 모드는 조회·배정', /GF_UI = \{ grade: \d+, mode: 'view' \}/.test(html));
+  // 색만으로 구분하지 않는다: 금지=사선 무늬, 부분금지=삼각, RA=✓
+  check('금지 슬롯을 사선 무늬로 구분', /td\.gf-nogo \{[\s\S]*?repeating-linear-gradient/.test(html));
+  check('부분 금지를 모서리 삼각으로 구분', /td\.gf-pblock::before \{[\s\S]*?border-style: solid/.test(html));
+  check('RA 배정 셀에 ✓ 표식', /r\.covered \? '✓ ' : ''/.test(html));
+
+  // (3) 클릭 예측 가능성: 모드가 주동작을 결정하고 툴팁이 그대로 안내한다
+  const hint = html.slice(html.indexOf('function gfClickHint('), html.indexOf('function gradeFreeNote('));
+  check('클릭 힌트 함수가 모드를 먼저 본다', /if \(paint\) return '클릭: '/.test(hint));
+  check('조회 모드 클릭 힌트: RA 배정', /클릭: RA 감독 배정/.test(hint)
+    && /클릭 동작 없음/.test(hint));
+  check('칠하기 모드 클릭 힌트에 즉시 저장 명시', /금지 해제\(즉시 저장\)/.test(hint) && /금지로 지정\(즉시 저장\)/.test(hint));
+  // 칠하기 모드에서는 RA 클릭 핸들러를 아예 걸지 않는다(오작동 방지)
+  const rgf = html.slice(html.indexOf('function renderGradeFree()'), html.indexOf('function isGradeFreeOpen()'));
+  check('칠하기 모드에서는 RA 핸들러를 걸지 않음', /if \(paint\) \{[\s\S]*?return;\n  \}/.test(rgf)
+    && rgf.indexOf('if (paint) {') < rgf.indexOf('openRaAssign'));
+  // 렌더는 dirty 를 '켜지' 않는다 — 읽어서 칠하기 모드를 강제로 내리는 것만 허용
+  check('통합 렌더가 SETTINGS_DIRTY 를 켜지 않음', rgf.length > 0 && !/SETTINGS_DIRTY = /.test(rgf));
+  check('미저장 변경 상태에서는 칠하기 모드가 유지되지 않음',
+    /if \(GF_UI\.mode === 'paint' && SETTINGS_DIRTY\) GF_UI\.mode = 'view';/.test(rgf));
+
+  // (4) 즉시 저장: 드래그는 미리보기만, 커밋은 한 번
+  const paintStart = html.indexOf('function gfPaintGuard()');
+  const paintSrc = html.slice(paintStart, html.indexOf('// 고정 수업 카드', paintStart));
+  check('칠하기 소스 블록 추출', paintSrc.length > 500);
+  check('드래그 중에는 저장하지 않음(미리보기 클래스만)',
+    /function gfPaintAdd\([\s\S]*?classList\.add\(GF_PAINT\.action === 'PAINT' \? 'gf-paint-on' : 'gf-paint-off'\)/.test(paintSrc));
+  check('postConfig 호출은 gfCommitBlocks 한 곳뿐',
+    (paintSrc.match(/postConfig\(/g) || []).length === 1
+    && /function gfCommitBlocks\([\s\S]*?postConfig\(cfg\)/.test(paintSrc));
+  check('드래그 종료 시 커밋은 1회', (paintSrc.slice(paintSrc.indexOf('function gfPaintEnd()'),
+    paintSrc.indexOf('function gfBulkToggle(')).match(/gfCommitBlocks\(/g) || []).length === 1);
+  check('바뀐 칸이 없으면 저장하지 않음', /if \(!n\) \{ renderGradeFree\(\); return; \}/.test(paintSrc));
+  check('즉시 저장은 DRAFT 가 아니라 시트 기준(STATE.config)',
+    /function gfBlocks\(\) \{ return normalizeBlocks\(STATE\.config && STATE\.config\.fixedBlocks\); \}/.test(html)
+    && !/DRAFT\./.test(paintSrc));
+  check('저장 형태 변환은 [저장] 경로와 공용(blocksToConfig)',
+    /cfg\.fixedBlocks = blocksToConfig\(blocks\)/.test(paintSrc)
+    && /var blocks = blocksToConfig\(DRAFT\.fixedBlocks\)/.test(html));
+
+  // (5) 실패 복구 + dirty 무오염
+  check('저장 후 성공·실패 무관하게 시트 기준으로 재구성',
+    /postConfig\(cfg\)\.then\(function \(\) \{\s*buildDraftFromConfig\(\);\s*SETTINGS_DIRTY = false;[^\n]*\s*renderSettings\(\);/.test(paintSrc));
+  check('즉시 저장은 keepOpen 을 넘기지 않음(409 가 dirty 를 켜지 못하게)',
+    !/postConfig\(cfg, true\)/.test(paintSrc));
+  check('실제로 바뀐 경우에만 성공 토스트', /if \(after !== before\)/.test(paintSrc));
+  check('미저장 변경이 있으면 칠하기를 막는다',
+    /function gfPaintGuard\(\) \{\n\s*if \(!SETTINGS_DIRTY\) return true;/.test(paintSrc));
+  check('칠하기 시작·커밋·일괄전환 모두 가드를 거친다',
+    (paintSrc.match(/gfPaintGuard\(\)/g) || []).length === 4);
+
+  // (6) 일괄 전환(머리글)은 확인을 받는다 — 즉시 저장이라 실수 비용이 크다
+  check('요일/교시 일괄 전환에 확인 절차', /function gfBulkToggle\([\s\S]*?if \(!confirm\(/.test(paintSrc)
+    && /즉시 저장됩니다/.test(paintSrc));
+
+  // (7) 드래그 위임 핸들러가 새 이름으로 연결됐고 공강 현황 탭에서만 동작한다
+  check('드래그 핸들러 바인딩 갱신', /body\.addEventListener\('mousedown', gfPaintStart\);/.test(html)
+    && /document\.addEventListener\('mouseup', gfPaintEnd\);/.test(html));
+  check('칠하기는 공강 현황 탭 + paint 모드에서만',
+    /function gfPaintable\(ev\) \{\n\s*if \(!isGradeFreeOpen\(\) \|\| GF_UI\.mode !== 'paint'\) return null;/.test(paintSrc));
+
+  // (8) 금지 슬롯 탭은 지금처럼 DRAFT + [저장] 방식 그대로
+  const blkSec = html.slice(html.indexOf('data-tab="block"><h3>금지 슬롯 규칙'), html.indexOf('data-tab="group"><h3>'));
+  check('금지 슬롯 탭은 [저장] 방식 유지 안내', /\[저장\]을 눌러야 반영됩니다/.test(blkSec));
+  check('금지 슬롯 탭 저장 푸터는 그대로 노출',
+    /getElementById\('settingsFooter'\)\.style\.display = \(SETTINGS_TAB === 'gradefree'\) \? 'none' : ''/.test(html));
 })();
 
 console.log('');
