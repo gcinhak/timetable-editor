@@ -2479,6 +2479,43 @@ await (async function () {
   check('학년별 시간표 탭 안내가 RA 배정 위치를 그리드로 지목', /RA 감독 배정은 메인 그리드에서 합니다/.test(gfSec));
 })();
 
+/* =========================================================
+   설정 모달 열기 순서 — 열림 표시(.open)가 최초 렌더보다 먼저다
+   (회귀: openSettings 가 .open 을 붙이기 전에 renderSettings 를 불러
+    첫 탭 '학년별 시간표' 매트릭스가 비어 있던 버그)
+   ========================================================= */
+(function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const src = fnSrc(html, 'openSettings');
+  check('openSettings 소스 추출', src.length > 50);
+
+  const iOpen = src.indexOf("getElementById('settings').classList.add('open')");
+  const iBackdrop = src.indexOf("getElementById('backdrop').classList.add('on')");
+  const iRender = src.indexOf('renderSettings()');
+  check('openSettings 가 settings 에 .open 을 붙인다', iOpen !== -1);
+  check('openSettings 가 backdrop 에 .on 을 붙인다', iBackdrop !== -1);
+  check('openSettings 가 renderSettings() 를 호출한다', iRender !== -1);
+  check('.open 추가가 renderSettings() 호출보다 앞선다', iOpen !== -1 && iRender !== -1 && iOpen < iRender);
+  check('backdrop .on 추가도 renderSettings() 호출보다 앞선다', iBackdrop !== -1 && iRender !== -1 && iBackdrop < iRender);
+  check('openSettings 가 첫 탭을 학년별 시간표로 지정', /SETTINGS_TAB = 'gradefree';/.test(src));
+  const iTab = src.indexOf("SETTINGS_TAB = 'gradefree'");
+  check('탭 지정도 renderSettings() 호출보다 앞선다', iTab !== -1 && iTab < iRender);
+
+  // 순서가 중요한 이유(게이트 사슬)가 그대로인지 함께 못 박는다
+  check('매트릭스 렌더는 .open 클래스 게이트를 거친다',
+    /function isSettingsOpen\(\) \{ return document\.getElementById\('settings'\)\.classList\.contains\('open'\); \}/.test(html)
+    && /function isGradeFreeOpen\(\) \{ return isSettingsOpen\(\) && SETTINGS_TAB === 'gradefree'; \}/.test(html)
+    && /function renderGradeFreeIfOpen\(\) \{ if \(isGradeFreeOpen\(\)\) renderGradeFree\(\); \}/.test(html));
+  check('renderSettings 가 마지막에 renderGradeFreeIfOpen 을 부른다',
+    /applySettingsTab\(\);\s*renderGradeFreeIfOpen\(\);\s*\}/.test(fnSrc(html, 'renderSettings')));
+
+  // 탭 전환도 같은 계약 — 플래그(SETTINGS_TAB) 를 세운 뒤에 렌더한다
+  const swSrc = fnSrc(html, 'switchSettingsTab');
+  const iSet = swSrc.indexOf('SETTINGS_TAB = tab');
+  const iGf = swSrc.indexOf('renderGradeFreeIfOpen()');
+  check('switchSettingsTab 은 SETTINGS_TAB 갱신 후에 렌더한다', iSet !== -1 && iGf !== -1 && iSet < iGf);
+})();
+
 console.log('');
 if (failures.length) {
   console.log('실패 ' + failures.length + '건:');

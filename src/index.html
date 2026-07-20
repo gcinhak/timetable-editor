@@ -1751,9 +1751,10 @@ function openSettings() {
   buildDraftFromConfig();
   SETTINGS_TAB = 'gradefree';
   SETTINGS_DIRTY = false;
-  renderSettings();
+  // 열림 표시가 먼저다 — 학년별 시간표 매트릭스는 isSettingsOpen()이 참일 때만 그려진다.
   document.getElementById('backdrop').classList.add('on');
   document.getElementById('settings').classList.add('open');
+  renderSettings();
 }
 
 function closeSettings() {
