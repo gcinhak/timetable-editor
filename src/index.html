@@ -497,13 +497,13 @@
     <button id="btnCloseSettings" class="x-close" type="button" aria-label="닫기">✕</button>
   </header>
   <div id="settingsTabs" class="tabbar">
+    <button type="button" data-tab="gradefree">학년별 시간표</button>
     <button type="button" data-tab="block">금지 슬롯</button>
     <button type="button" data-tab="group">연결 그룹</button>
     <button type="button" data-tab="classless">무반 과목</button>
     <button type="button" data-tab="team">팀티칭</button>
     <button type="button" data-tab="unavail">불가 시간</button>
     <button type="button" data-tab="pinned">고정 수업</button>
-    <button type="button" data-tab="gradefree">학년별 시간표</button>
   </div>
   <div id="settingsBody"></div>
   <footer id="settingsFooter">
@@ -776,7 +776,7 @@ var STATE = {
 };
 var COLORS = { green: 'hl-green', yellow: 'hl-yellow', blue: 'hl-blue', orange: 'hl-orange' };
 var DRAFT = null; // 설정 패널 편집용 사본
-var SETTINGS_TAB = 'block';   // 현재 활성 설정 탭
+var SETTINGS_TAB = 'gradefree';   // 현재 활성 설정 탭(= 탭 바 첫 번째)
 var SETTINGS_DIRTY = false;   // 저장하지 않은 변경 여부
 var GROUP_UI = { open: {}, q: {} }; // 연결 그룹 카드: 그룹 인덱스별 추가패널 열림/검색어
 var TEAM_UI = { open: {}, q: {} }; // 팀티칭 카드: 팀 인덱스별 추가패널 열림/검색어
@@ -1749,7 +1749,7 @@ function isSettingsOpen() { return document.getElementById('settings').classList
 
 function openSettings() {
   buildDraftFromConfig();
-  SETTINGS_TAB = 'block';
+  SETTINGS_TAB = 'gradefree';
   SETTINGS_DIRTY = false;
   renderSettings();
   document.getElementById('backdrop').classList.add('on');
@@ -2287,15 +2287,6 @@ function gfViewConfig() {
   var c = STATE.config || {};
   return { classless: c.classless || {}, fixedBlocks: blocksToConfig(gfBlocks()) };
 }
-// 해당 학년의 40칸(5요일×8교시) 중 '불가'/'일부' 칸 수 집계
-function ghGradeCounts(grade, blocks) {
-  var no = 0, part = 0;
-  for (var d = 0; d < 5; d++) for (var p = 1; p <= 8; p++) {
-    var s = ghState(blocks, d, p, grade);
-    if (s === '불가') no++; else if (s === '일부') part++;
-  }
-  return { no: no, part: part };
-}
 /* =========================================================
    학년별 공강 판정 — state.js gradeFreeState 인라인 미러
    ========================================================= */
@@ -2456,11 +2447,9 @@ function gradeFreeGridRowsHtml() {
 }
 
 function gradeFreeGradesHtml() {
-  var blocks = gfBlocks();
   return '<div class="gh-grades">' + [7, 8, 9, 10, 11, 12].map(function (gr) {
-    var n = ghGradeCounts(gr, blocks).no;
     return '<button data-g="' + gr + '"' + (gr === GF_UI.grade ? ' class="active"' : '') + '>' +
-      gr + '학년' + (n ? ' (금지 ' + n + ')' : '') + '</button>';
+      gr + '학년</button>';
   }).join('') + '</div>';
 }
 // 모드 전환 바 — 클릭이 무슨 일을 하는지 한 곳에서 결정하고 그대로 안내한다.

@@ -2342,7 +2342,9 @@ await (async function () {
   const tabbar = html.slice(html.indexOf('<div id="settingsTabs"'), html.indexOf('<div id="settingsBody">'));
   const tabs = tabbar.match(/data-tab="([a-z]+)"/g) || [];
   check('설정 탭이 7개(학년별 시간 흡수)', tabs.length === 7);
-  check('학년별 시간표 탭이 마지막', tabs[6] === 'data-tab="gradefree"' && /학년별 시간표<\/button>/.test(tabbar));
+  check('학년별 시간표 탭이 처음', tabs[0] === 'data-tab="gradefree"' && /학년별 시간표<\/button>/.test(tabbar));
+  check('설정 모달 기본 탭이 학년별 시간표', /SETTINGS_TAB = 'gradefree'/.test(html));
+  check('학년 버튼에 금지 개수 표기 없음', !/금지 ' \+ n \+ '\)/.test(html));
   check('탭 이름에 옛 이름(공강 현황)이 남아 있지 않음', !/공강 현황<\/button>/.test(html)
     && !/>공강 현황 <span class="muted h-help"/.test(html));
   check('학년별 시간표 섹션이 설정 본문에 렌더됨', /class="sec" data-tab="gradefree"/.test(html)
