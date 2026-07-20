@@ -1063,32 +1063,48 @@ await (async function () {
       },
       /^(.+?)(7|8|9|10|11|12)([A-C])$/, 40, 4);
 
-  const h = cell(7, 0, 1, [], false, ['PEng7A', 'TKD7B', 'Eng7C']);
+  // gradeFreeCellHtml(g, dd, p, cfg, blocks, paint, subjects)
+  //   cfg = 미리보기용 config(DRAFT 의 금지 슬롯을 반영) / blocks = 편집 형태 규칙
+  const h = cell(7, 0, 1, {}, [], false, ['PEng7A', 'TKD7B', 'Eng7C']);
   check('셀 렌더: 상태 줄과 과목 줄이 분리됨', h.indexOf('<div class="gf-st">') !== -1 && h.indexOf('<div class="gf-subj">') !== -1);
   check('셀 렌더: 과목이 줄바꿈되도록 각각 span', h.indexOf('<span>PEng7A</span><span>TKD7B</span><span>Eng7C</span>') !== -1);
   check('셀 렌더: 공강 상태 텍스트 유지', h.indexOf('전체') !== -1);
   check('셀 렌더: 과목 전체가 툴팁에도', h.indexOf('PEng7A / TKD7B / Eng7C') !== -1);
 
   // 과목 없는 칸은 과목 블록 자체가 없다(빈 점선이 남으면 안 됨)
-  check('셀 렌더: 과목 없으면 과목 줄 없음', cell(7, 0, 1, [], false, []).indexOf('gf-subj') === -1);
+  check('셀 렌더: 과목 없으면 과목 줄 없음', cell(7, 0, 1, {}, [], false, []).indexOf('gf-subj') === -1);
 
   // 5개 이상 → 앞의 4개 + '+N'
-  const hMany = cell(7, 0, 1, [], false, ['A7A', 'B7A', 'C7A', 'D7A', 'E7A', 'F7A']);
+  const hMany = cell(7, 0, 1, {}, [], false, ['A7A', 'B7A', 'C7A', 'D7A', 'E7A', 'F7A']);
   check('셀 렌더: 최대 4개 표시 + 나머지 +N', hMany.indexOf('<span class="gf-more">+2</span>') !== -1 && hMany.indexOf('E7A</span>') === -1);
   check('셀 렌더: 접힌 과목도 툴팁에는 전부', hMany.indexOf('E7A') !== -1 && hMany.indexOf('F7A') !== -1);
 
   // 칠하기 모드에서는 과목을 숨긴다(칸 판독 방해 방지)
-  check('셀 렌더: 칠하기 모드는 과목 숨김', cell(7, 0, 1, [], true, ['PEng7A']).indexOf('gf-subj') === -1);
+  check('셀 렌더: 칠하기 모드는 과목 숨김', cell(7, 0, 1, {}, [], true, ['PEng7A']).indexOf('gf-subj') === -1);
 
   // 과목명은 사용자 데이터 → HTML 이스케이프
-  const hEsc = cell(7, 0, 1, [], false, ['<img src=x onerror=alert(1)>7A']);
+  const hEsc = cell(7, 0, 1, {}, [], false, ['<img src=x onerror=alert(1)>7A']);
   check('셀 렌더: 과목명 HTML 이스케이프', hEsc.indexOf('<img') === -1 && hEsc.indexOf('&lt;img') !== -1);
 
   // 금지 슬롯: '금지' 표기를 유지하면서 편성된 과목도 함께 보인다(이상 신호)
   const blocks = [{ day: 0, period: 1, label: '회의', grades: [7], partialGrades: [], classes: [] }];
-  const hNogo = cell(7, 0, 1, blocks, false, ['PEng7A']);
+  const hNogo = cell(7, 0, 1, { fixedBlocks: blocks }, blocks, false, ['PEng7A']);
   check('셀 렌더: 금지 슬롯도 라벨 + 과목 병기',
     hNogo.indexOf('gf-nogo') !== -1 && hNogo.indexOf('회의') !== -1 && hNogo.indexOf('<span>PEng7A</span>') !== -1);
+
+  // 이름 있는 금지 슬롯 = 회색 블록(gf-named) + 라벨 / 이름 없는 금지 슬롯 = 사선 무늬 + '금지'
+  check('셀 렌더: 이름 있는 금지 슬롯은 gf-named + 라벨', hNogo.indexOf('gf-nogo gf-named') !== -1);
+  const bare = [{ day: 0, period: 1, label: '', grades: [7], partialGrades: [], classes: [] }];
+  const hBare = cell(7, 0, 1, { fixedBlocks: bare }, bare, false, []);
+  check('셀 렌더: 이름 없는 금지 슬롯은 사선(gf-named 없음) + 금지',
+    hBare.indexOf('gf-nogo') !== -1 && hBare.indexOf('gf-named') === -1 && hBare.indexOf('금지') !== -1);
+
+  // cfg 는 DRAFT 미리보기용 — 규칙이 cfg 에 반영되면 판정(kind)도 blocked 가 된다
+  check('셀 렌더: cfg 의 금지 규칙이 판정에 반영됨', hNogo.indexOf('gf-blocked') !== -1);
+  // 반대로 cfg 에서 규칙을 지우면(=칠하기로 해제) 더는 blocked 로 보이지 않는다
+  const hErased = cell(7, 0, 1, {}, [], false, ['PEng7A']);
+  check('셀 렌더: cfg 에서 규칙이 빠지면 금지 표기도 사라짐',
+    hErased.indexOf('gf-nogo') === -1 && hErased.indexOf('gf-blocked') === -1);
 }
 
 /* =========================================================
@@ -2318,26 +2334,28 @@ await (async function () {
   check('고정시간 인식불가 경고 유지', /고정시간 인식불가: /.test(noteFn));
   check('툴바 알림 엘리먼트 마크업/스타일', /<span id="toolbarNote"><\/span>/.test(html)
     && /#toolbarNote \{[^}]*color: #b3261e/.test(html));
-  // 공강 현황 안의 '미분류 N과목은 판정에서 제외됨'은 별개 표시라 그대로 남는다
-  check('공강 현황의 미분류 안내는 유지', /미분류 ' \+ n \+ '과목은 판정에서 제외됨/.test(html));
+  // 학년별 시간표 안의 '미분류 N과목은 판정에서 제외됨'은 별개 표시라 그대로 남는다
+  check('학년별 시간표의 미분류 안내는 유지', /미분류 ' \+ n \+ '과목은 판정에서 제외됨/.test(html));
 
-  // (4) 공강 현황: 독립 모달 → 설정 모달의 8번째 탭
-  check('공강 현황 독립 모달 제거', !/id="gradeFree"|btnGradeFree|btnCloseGradeFree|openGradeFree|closeGradeFree/.test(html));
+  // (4) 학년별 시간표: 독립 모달 → 설정 모달의 8번째 탭
+  check('학년별 시간표 독립 모달 제거', !/id="gradeFree"|btnGradeFree|btnCloseGradeFree|openGradeFree|closeGradeFree/.test(html));
   const tabbar = html.slice(html.indexOf('<div id="settingsTabs"'), html.indexOf('<div id="settingsBody">'));
   const tabs = tabbar.match(/data-tab="([a-z]+)"/g) || [];
   check('설정 탭이 7개(학년별 시간 흡수)', tabs.length === 7);
-  check('공강 현황 탭이 마지막', tabs[6] === 'data-tab="gradefree"' && /공강 현황<\/button>/.test(tabbar));
-  check('공강 현황 섹션이 설정 본문에 렌더됨', /class="sec" data-tab="gradefree"/.test(html)
+  check('학년별 시간표 탭이 마지막', tabs[6] === 'data-tab="gradefree"' && /학년별 시간표<\/button>/.test(tabbar));
+  check('탭 이름에 옛 이름(공강 현황)이 남아 있지 않음', !/공강 현황<\/button>/.test(html)
+    && !/>공강 현황 <span class="muted h-help"/.test(html));
+  check('학년별 시간표 섹션이 설정 본문에 렌더됨', /class="sec" data-tab="gradefree"/.test(html)
     && /id="gradeFreeNote"/.test(html) && /id="gradeFreeGrades"/.test(html) && /id="gradeFreeBody"/.test(html));
-  // 조회 전용 탭에서는 [저장] 푸터를 숨긴다
-  check('공강 현황 탭에서 저장 푸터 숨김',
-    /getElementById\('settingsFooter'\)\.style\.display = \(SETTINGS_TAB === 'gradefree'\) \? 'none' : ''/.test(html));
+  check('학년별 시간표 섹션 제목이 새 이름', /data-tab="gradefree"><h3>학년별 시간표 /.test(html));
+  // 모든 탭이 DRAFT + [저장] 방식 → 탭에 따라 푸터를 숨기지 않는다
+  check('탭에 따라 저장 푸터를 숨기지 않음', !/settingsFooter'\)\.style\.display/.test(html));
   // 보기만 해도 dirty 가 되면 안 된다 — 렌더 경로에 SETTINGS_DIRTY 대입이 없다
   const gfRender = html.slice(html.indexOf('function renderGradeFree()'), html.indexOf('function isGradeFreeOpen()'));
-  check('공강 현황 렌더가 SETTINGS_DIRTY 를 켜지 않음', gfRender.length > 0 && !/SETTINGS_DIRTY = /.test(gfRender));
-  check('공강 현황 열림 판정이 설정 탭 기준', /SETTINGS_TAB === 'gradefree'/.test(html)
+  check('학년별 시간표 렌더가 SETTINGS_DIRTY 를 켜지 않음', gfRender.length > 0 && !/SETTINGS_DIRTY = /.test(gfRender));
+  check('학년별 시간표 열림 판정이 설정 탭 기준', /SETTINGS_TAB === 'gradefree'/.test(html)
     && /function isGradeFreeOpen\(\) \{ return isSettingsOpen\(\) && SETTINGS_TAB === 'gradefree'; \}/.test(html));
-  check('탭 전환 시 공강 현황 재렌더', /applySettingsTab\(\);\n  renderGradeFreeIfOpen\(\);/.test(html));
+  check('탭 전환 시 학년별 시간표 재렌더', /applySettingsTab\(\);\n  renderGradeFreeIfOpen\(\);/.test(html));
   // RA 감독 배정 흐름이 설정 모달 위에서도 뜬다(z-index) — 그리고 닫아도 설정의 백드롭은 남는다
   check('RA 배정 팝업이 설정 모달보다 위(z-index)', /#raAssign \{[\s\S]*?z-index: 60;/.test(html)
     && /#settings \{[\s\S]*?z-index: 55;/.test(html));
@@ -2349,8 +2367,8 @@ await (async function () {
 })();
 
 /* =========================================================
-   '학년별 시간' + '공강 현황' 통합 탭 (index.html 정적 검증)
-   — 즉시 저장 / 드래그 1회 저장 / 실패 복구 / SETTINGS_DIRTY 무오염 / 모드 분리
+   '학년별 시간' + '학년별 시간표' 통합 탭 (index.html 정적 검증)
+   — DRAFT 편집 + [저장] / 드래그 1회 커밋 / RA 배정은 그리드 전용 / 이름 있는 금지 슬롯
    ========================================================= */
 (function () {
   const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
@@ -2364,75 +2382,99 @@ await (async function () {
     && /function ghToggle\(/.test(html) && /function ghPartClasses\(/.test(html));
 
   // (2) 통합 탭 UI: 모드 전환 + 범례
-  check('공강 현황 탭에 모드 전환 바', /id="gradeFreeMode"/.test(html)
+  check('학년별 시간표 탭에 모드 전환 바', /id="gradeFreeMode"/.test(html)
     && /data-gfmode="view"/.test(html) && /data-gfmode="paint"/.test(html));
-  check('공강 현황 탭에 범례', /id="gradeFreeLegend"/.test(html) && /function gradeFreeLegendHtml\(/.test(html));
-  check('기본 모드는 조회·배정', /GF_UI = \{ grade: \d+, mode: 'view' \}/.test(html));
-  // 색만으로 구분하지 않는다: 금지=사선 무늬, 부분금지=삼각, RA=✓
-  check('금지 슬롯을 사선 무늬로 구분', /td\.gf-nogo \{[\s\S]*?repeating-linear-gradient/.test(html));
+  check('학년별 시간표 탭에 범례', /id="gradeFreeLegend"/.test(html) && /function gradeFreeLegendHtml\(/.test(html));
+  check('기본 모드는 조회', /GF_UI = \{ grade: \d+, mode: 'view' \}/.test(html));
+  // 색만으로 구분하지 않는다: 이름없는 금지=사선, 이름있는 금지=회색+실선테두리+이름, 부분금지=삼각, RA=✓
+  check('이름 없는 금지 슬롯을 사선 무늬로 구분', /td\.gf-nogo \{[\s\S]*?repeating-linear-gradient/.test(html));
+  check('이름 있는 금지 슬롯은 회색 + 무늬 없음', /td\.gf-nogo\.gf-named \{[\s\S]*?background-image: none;/.test(html));
+  check('이름 있는 금지 슬롯에 색 외 채널(실선 안쪽 테두리)',
+    /td\.gf-nogo\.gf-named \{[\s\S]*?box-shadow: inset 0 0 0 2px/.test(html));
+  check('라벨 유무로 gf-named 를 나눈다',
+    /cls \+= blkLabel \? ' gf-nogo gf-named' : ' gf-nogo';/.test(html));
+  check('금지 슬롯 본문은 라벨(있으면) 아니면 \'금지\'', /if \(bst === '불가'\) text = blkLabel \|\| '금지';/.test(html));
   check('부분 금지를 모서리 삼각으로 구분', /td\.gf-pblock::before \{[\s\S]*?border-style: solid/.test(html));
   check('RA 배정 셀에 ✓ 표식', /r\.covered \? '✓ ' : ''/.test(html));
+  // 범례가 두 종류의 금지 슬롯을 각각 설명한다
+  const legend = html.slice(html.indexOf('function gradeFreeLegendHtml('), html.indexOf('// 통합 매트릭스:'));
+  check('범례에 이름 있는 금지 슬롯 항목', /\['sw-named', '이름 있는 금지 슬롯/.test(legend));
+  check('범례에 이름 없는 금지 슬롯 항목', /\['sw-nogo', '이름 없는 금지 슬롯/.test(legend));
+  check('범례 스와치 sw-named 스타일 존재', /\.gf-legend i\.sw-named \{[\s\S]*?box-shadow: inset/.test(html));
+  check('범례가 RA 배정 위치를 그리드로 안내', /배정은 메인 그리드에서/.test(legend));
 
-  // (3) 클릭 예측 가능성: 모드가 주동작을 결정하고 툴팁이 그대로 안내한다
+  // (3) 클릭 예측 가능성: 이 탭의 칸 클릭 동작은 칠하기뿐이다
   const hint = html.slice(html.indexOf('function gfClickHint('), html.indexOf('function gradeFreeNote('));
   check('클릭 힌트 함수가 모드를 먼저 본다', /if \(paint\) return '클릭: '/.test(hint));
-  check('조회 모드 클릭 힌트: RA 배정', /클릭: RA 감독 배정/.test(hint)
-    && /클릭 동작 없음/.test(hint));
-  check('칠하기 모드 클릭 힌트에 즉시 저장 명시', /금지 해제\(즉시 저장\)/.test(hint) && /금지로 지정\(즉시 저장\)/.test(hint));
-  // 칠하기 모드에서는 RA 클릭 핸들러를 아예 걸지 않는다(오작동 방지)
+  check('조회 모드에는 클릭 동작이 없다', /클릭 동작 없음/.test(hint) && !/RA/.test(hint));
+  check('칠하기 모드 클릭 힌트에 [저장] 필요 명시',
+    /금지 해제\(\[저장\] 필요\)/.test(hint) && /금지로 지정\(\[저장\] 필요\)/.test(hint));
+  // 렌더는 dirty 를 '켜지'도 '끄지'도 않는다
   const rgf = html.slice(html.indexOf('function renderGradeFree()'), html.indexOf('function isGradeFreeOpen()'));
-  check('칠하기 모드에서는 RA 핸들러를 걸지 않음', /if \(paint\) \{[\s\S]*?return;\n  \}/.test(rgf)
-    && rgf.indexOf('if (paint) {') < rgf.indexOf('openRaAssign'));
-  // 렌더는 dirty 를 '켜지' 않는다 — 읽어서 칠하기 모드를 강제로 내리는 것만 허용
-  check('통합 렌더가 SETTINGS_DIRTY 를 켜지 않음', rgf.length > 0 && !/SETTINGS_DIRTY = /.test(rgf));
-  check('미저장 변경 상태에서는 칠하기 모드가 유지되지 않음',
-    /if \(GF_UI\.mode === 'paint' && SETTINGS_DIRTY\) GF_UI\.mode = 'view';/.test(rgf));
+  check('통합 렌더가 SETTINGS_DIRTY 를 건드리지 않음', rgf.length > 0 && !/SETTINGS_DIRTY/.test(rgf));
+  check('칠하기 모드가 아니면 칸 핸들러를 걸지 않음', /if \(!paint\) return;/.test(rgf));
 
-  // (4) 즉시 저장: 드래그는 미리보기만, 커밋은 한 번
-  const paintStart = html.indexOf('function gfPaintGuard()');
+  // (4) RA 감독 배정은 이 탭에서 제거 — 메인 그리드 전용
+  check('학년별 시간표 탭에서 openRaAssign 호출 없음', !/openRaAssign/.test(rgf));
+  const gfCell = html.slice(html.indexOf('function gradeFreeCellHtml('), html.indexOf('// "이 칸을 클릭하면'));
+  check('셀 렌더에도 RA 배정 배선 없음', !/openRaAssign/.test(gfCell));
+  check('매트릭스 공강 셀에 pointer 커서 없음(클릭 대상 아님)',
+    !/table\.gh-matrix td\.gf-all, table\.gh-matrix td\.gf-some, table\.gh-matrix td\.gf-part \{ cursor: pointer; \}/.test(html));
+  // RA 배정 팝업 자체와 그리드 경로는 그대로 살아 있다(회귀 방지)
+  check('RA 배정 팝업은 그대로 존재', /id="raAssign"/.test(html) && /function openRaAssign\(day, period, grade\)/.test(html));
+  check('그리드 공강 행 → RA 배정 경로 유지(회귀)', /td\.gfr-all,td\.gfr-some,td\.gfr-partial/.test(html)
+    && /openRaAssign\(\+td\.dataset\.day, \+td\.dataset\.period, \+td\.dataset\.grade\)/.test(html));
+  check('openRaAssign 호출 지점은 그리드 한 곳뿐',
+    (html.match(/openRaAssign\(\+td\.dataset/g) || []).length === 1);
+  // 조회용 RA 상태 표시(감독 이름·✓)는 남긴다
+  check('RA 감독 이름은 조회용으로 유지', /function raSupBreakdownAt\(/.test(html)
+    && /raSupBreakdownAt\(dd \* 8 \+ \(p - 1\), g\)/.test(html));
+
+  // (5) 칠하기는 DRAFT 편집 — 드래그는 미리보기만, 커밋은 한 번, 저장은 [저장] 버튼이
+  const paintStart = html.indexOf('function gfPaintable(ev)');
   const paintSrc = html.slice(paintStart, html.indexOf('// 고정 수업 카드', paintStart));
   check('칠하기 소스 블록 추출', paintSrc.length > 500);
-  check('드래그 중에는 저장하지 않음(미리보기 클래스만)',
+  check('드래그 중에는 아무것도 커밋하지 않음(미리보기 클래스만)',
     /function gfPaintAdd\([\s\S]*?classList\.add\(GF_PAINT\.action === 'PAINT' \? 'gf-paint-on' : 'gf-paint-off'\)/.test(paintSrc));
-  check('postConfig 호출은 gfCommitBlocks 한 곳뿐',
-    (paintSrc.match(/postConfig\(/g) || []).length === 1
-    && /function gfCommitBlocks\([\s\S]*?postConfig\(cfg\)/.test(paintSrc));
+  check('칠하기 경로에 postConfig 호출이 없다(저장은 [저장] 버튼만)', !/postConfig/.test(paintSrc));
   check('드래그 종료 시 커밋은 1회', (paintSrc.slice(paintSrc.indexOf('function gfPaintEnd()'),
     paintSrc.indexOf('function gfBulkToggle(')).match(/gfCommitBlocks\(/g) || []).length === 1);
-  check('바뀐 칸이 없으면 저장하지 않음', /if \(!n\) \{ renderGradeFree\(\); return; \}/.test(paintSrc));
-  check('즉시 저장은 DRAFT 가 아니라 시트 기준(STATE.config)',
-    /function gfBlocks\(\) \{ return normalizeBlocks\(STATE\.config && STATE\.config\.fixedBlocks\); \}/.test(html)
-    && !/DRAFT\./.test(paintSrc));
+  check('바뀐 칸이 없으면 커밋하지 않음', /if \(!n\) \{ renderGradeFree\(\); return; \}/.test(paintSrc));
+  check('칠하기 대상은 시트가 아니라 DRAFT',
+    /function gfBlocks\(\) \{ return \(DRAFT && DRAFT\.fixedBlocks\) \|\| \[\]; \}/.test(html));
+  check('커밋은 DRAFT 갱신 + dirty + 재렌더뿐',
+    /function gfCommitBlocks\(n, action\) \{\s*SETTINGS_DIRTY = true;\s*renderSettings\(\);/.test(paintSrc));
+  check('커밋 토스트가 [저장] 필요를 알린다', /\[저장\]을 눌러야 반영됩니다'\);/.test(paintSrc));
+  // 미리보기 config: 저장 전에도 화면이 DRAFT 편집 결과와 일치한다
+  check('미리보기 판정이 DRAFT 기준 config 를 쓴다',
+    /function gfViewConfig\(\) \{[\s\S]*?fixedBlocks: blocksToConfig\(gfBlocks\(\)\)/.test(html)
+    && /var cfg = gfViewConfig\(\);/.test(html)
+    && /var r = gradeFreeState\(STATE\.model, cfg, g, \{ day: dd, period: p \}\);/.test(html));
   check('저장 형태 변환은 [저장] 경로와 공용(blocksToConfig)',
-    /cfg\.fixedBlocks = blocksToConfig\(blocks\)/.test(paintSrc)
-    && /var blocks = blocksToConfig\(DRAFT\.fixedBlocks\)/.test(html));
+    /var blocks = blocksToConfig\(DRAFT\.fixedBlocks\)/.test(html));
 
-  // (5) 실패 복구 + dirty 무오염
-  check('저장 후 성공·실패 무관하게 시트 기준으로 재구성',
-    /postConfig\(cfg\)\.then\(function \(\) \{\s*buildDraftFromConfig\(\);\s*SETTINGS_DIRTY = false;[^\n]*\s*renderSettings\(\);/.test(paintSrc));
-  check('즉시 저장은 keepOpen 을 넘기지 않음(409 가 dirty 를 켜지 못하게)',
-    !/postConfig\(cfg, true\)/.test(paintSrc));
-  check('실제로 바뀐 경우에만 성공 토스트', /if \(after !== before\)/.test(paintSrc));
-  check('미저장 변경이 있으면 칠하기를 막는다',
-    /function gfPaintGuard\(\) \{\n\s*if \(!SETTINGS_DIRTY\) return true;/.test(paintSrc));
-  check('칠하기 시작·커밋·일괄전환 모두 가드를 거친다',
-    (paintSrc.match(/gfPaintGuard\(\)/g) || []).length === 4);
+  // (6) 혼재 처리용 가드는 더 이상 필요 없다 — 모든 조작이 draft 라 정리했다
+  check('gfPaintGuard 제거', !/gfPaintGuard/.test(html));
+  check('미저장 변경이 칠하기 모드를 강제로 내리지 않음',
+    !/GF_UI\.mode === 'paint' && SETTINGS_DIRTY/.test(html));
 
-  // (6) 일괄 전환(머리글)은 확인을 받는다 — 즉시 저장이라 실수 비용이 크다
-  check('요일/교시 일괄 전환에 확인 절차', /function gfBulkToggle\([\s\S]*?if \(!confirm\(/.test(paintSrc)
-    && /즉시 저장됩니다/.test(paintSrc));
+  // (7) 일괄 전환(머리글)은 확인을 받되 [저장] 방식임을 알린다
+  check('요일/교시 일괄 전환에 확인 절차', /function gfBulkToggle\([\s\S]*?if \(!confirm\(/.test(paintSrc));
+  check('일괄 전환 확인문구가 [저장] 방식 안내', /\[저장\]을 눌러야 반영됩니다\.'\)\) return;/.test(paintSrc));
+  check('즉시 저장 문구가 남아 있지 않음', !/즉시 저장/.test(html));
 
-  // (7) 드래그 위임 핸들러가 새 이름으로 연결됐고 공강 현황 탭에서만 동작한다
+  // (8) 드래그 위임 핸들러가 새 이름으로 연결됐고 학년별 시간표 탭에서만 동작한다
   check('드래그 핸들러 바인딩 갱신', /body\.addEventListener\('mousedown', gfPaintStart\);/.test(html)
     && /document\.addEventListener\('mouseup', gfPaintEnd\);/.test(html));
-  check('칠하기는 공강 현황 탭 + paint 모드에서만',
+  check('칠하기는 학년별 시간표 탭 + paint 모드에서만',
     /function gfPaintable\(ev\) \{\n\s*if \(!isGradeFreeOpen\(\) \|\| GF_UI\.mode !== 'paint'\) return null;/.test(paintSrc));
 
-  // (8) 금지 슬롯 탭은 지금처럼 DRAFT + [저장] 방식 그대로
+  // (9) 금지 슬롯 탭과 완전히 같은 계약 — 탭 전체가 draft + [저장]으로 통일됐다
   const blkSec = html.slice(html.indexOf('data-tab="block"><h3>금지 슬롯 규칙'), html.indexOf('data-tab="group"><h3>'));
   check('금지 슬롯 탭은 [저장] 방식 유지 안내', /\[저장\]을 눌러야 반영됩니다/.test(blkSec));
-  check('금지 슬롯 탭 저장 푸터는 그대로 노출',
-    /getElementById\('settingsFooter'\)\.style\.display = \(SETTINGS_TAB === 'gradefree'\) \? 'none' : ''/.test(html));
+  const gfSec = html.slice(html.indexOf('data-tab="gradefree"><h3>'), html.indexOf("html += '<div id=\"gradeFreeNote\""));
+  check('학년별 시간표 탭 안내도 [저장] 방식', /\[저장\]을 눌러야 반영됩니다/.test(gfSec));
+  check('학년별 시간표 탭 안내가 RA 배정 위치를 그리드로 지목', /RA 감독 배정은 메인 그리드에서 합니다/.test(gfSec));
 })();
 
 console.log('');
