@@ -102,6 +102,7 @@
   #groupHint { font-size: 12px; color: #2f5fa8; font-weight: 600; }
   #sheetNote { font-size: 11px; color: #888; }
   #userInfo { margin-left: auto; font-size: 11px; color: #999; }
+  body.dev-mode #btnLogout { display: none; }   /* 개발 모드에는 로그인 개념이 없다 */
   #raToggle, #setModeToggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #555; }
 
   /* 그리드 */
@@ -453,6 +454,7 @@
   <span id="unclassified"></span>
   <span id="sheetNote"></span>
   <span id="userInfo"></span>
+  <button id="btnLogout" type="button" title="로그아웃 — 이 브라우저의 로그인 정보를 지웁니다">로그아웃</button>
 </div>
 
 <div id="gridWrap"></div>
@@ -853,6 +855,57 @@ function enterApp() {
     handleErr(err);
   });
 }
+
+/* 로그아웃 시 열려 있는 모달/오버레이와 모드 표시를 되돌린다(DOM 전용). */
+function closeOverlays() {
+  ['settings', 'gradeFree', 'raAssign'].forEach(function (id) {
+    document.getElementById(id).classList.remove('open');
+  });
+  document.getElementById('slotPop').classList.remove('on');
+  document.getElementById('backdrop').classList.remove('on');
+  document.getElementById('btnUnavailMode').classList.remove('active');
+  document.getElementById('setModeCheck').checked = false;
+  document.body.classList.remove('set-mode', 'unavail-mode');
+}
+
+/* @logout-start
+ * 로컬 세션만 정리한다. 구글 계정 권한(scope)은 revoke 하지 않는다 —
+ * revoke 하면 다음 로그인 때 동의 화면을 다시 거쳐야 해서 마찰만 커진다.
+ * 최근 시트(RECENT_KEY)도 지우지 않는다(개인정보가 아니고 다음 사용자도 같은 시트를 쓴다).
+ * 테스트가 이 구간을 통째로 추출한다 — DOM 은 showLogin/closeOverlays 에만 위임한다. */
+
+/* 아직 시트에 반영되지 않은 편집이 남아 있는가 */
+function hasUnsavedWork() {
+  return !!(STATE.plan || STATE.unavailDirty || SETTINGS_DIRTY);
+}
+
+function doLogout() {
+  if (DEV_MODE) return;
+  if (hasUnsavedWork() && !confirm('저장하지 않은 변경이 있습니다. 로그아웃할까요?')) return;
+
+  setToken('');                 // ID 토큰 삭제
+  sheetsToken = '';             // 시트 접근 토큰(메모리) 폐기
+  sheetsTokenGen++;             // 진행 중이던 요청이 옛 토큰으로 재시도하지 않도록 세대를 올린다
+  tokenPending = null;
+  accessPending = null;
+
+  // 진행 중이던 작업 상태 정리
+  STATE.target = null; STATE.plan = null; STATE.planTo = null; STATE.cellMap = null;
+  STATE.undoStack = [];
+  STATE.grid = null; STATE.config = null; STATE.model = null; STATE.user = '';
+  STATE.setMode = false; STATE.unavailMode = false; STATE.unavailDirty = false;
+  DRAFT = null;
+  SETTINGS_DIRTY = false;
+
+  // 이걸 빼면 다음 접속 때 자동으로 다시 로그인돼 로그아웃이 무의미해진다.
+  if (typeof google !== 'undefined' && google.accounts && google.accounts.id) {
+    google.accounts.id.disableAutoSelect();
+  }
+
+  closeOverlays();
+  showLogin('로그아웃되었습니다.');
+}
+/* @logout-end */
 
 function bootstrap() {
   if (!DEV_MODE) {
@@ -3442,6 +3495,9 @@ window.addEventListener('load', function () {
     if (document.getElementById('settings').classList.contains('open')) { closeSettings(); return; }
     clearSelection();
   });
+
+  document.getElementById('btnLogout').addEventListener('click', doLogout);
+  if (DEV_MODE) show('btnLogout', false);   // 개발 모드에는 로그인 개념이 없다
 
   if (DEV_MODE || getToken()) enterApp();
   else showLogin();

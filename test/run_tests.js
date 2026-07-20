@@ -2063,6 +2063,111 @@ await (async function () {
 })();
 
 /* =========================================================
+   로그아웃(index.html @logout) — 실제 doLogout 소스를 그대로 실행한다.
+   DOM(showLogin/closeOverlays)과 GIS(google)만 가짜로 주입한다.
+   ========================================================= */
+(function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const start = html.indexOf('/* @logout-start');
+  const endMark = html.indexOf('/* @logout-end */', start);
+  check('index.html 에서 @logout 구간 추출', start > 0 && endMark > start);
+  const src = html.slice(start, endMark);
+
+  /* devMode / confirm 응답 / STATE 초기값을 바꿔가며 doLogout 을 실행한다. */
+  const build = function (opts) {
+    const o = opts || {};
+    const env = {
+      stored: { idToken: 'ID_TOKEN', recent: 'SHEET_1' },   // recent 는 로그아웃해도 남아야 한다
+      confirms: [],
+      login: [],
+      overlaysClosed: 0,
+      autoSelectDisabled: 0
+    };
+    const setToken = function (t) { env.stored.idToken = t || ''; };
+    const confirmFn = function (msg) { env.confirms.push(msg); return !!o.confirmYes; };
+    const showLogin = function (msg) { env.login.push(msg); };
+    const closeOverlays = function () { env.overlaysClosed++; };
+    const google = o.noGis ? undefined : {
+      accounts: { id: { disableAutoSelect: function () { env.autoSelectDisabled++; } } }
+    };
+    const STATE = Object.assign({
+      target: null, plan: null, planTo: null, cellMap: null, undoStack: [],
+      grid: null, config: null, model: null, user: 'a@b.c',
+      setMode: false, unavailMode: false, unavailDirty: false
+    }, o.state || {});
+
+    const api = new Function(
+      'DEV_MODE', 'setToken', 'confirm', 'google', 'STATE', 'SETTINGS_DIRTY', 'DRAFT', 'showLogin', 'closeOverlays',
+      'var sheetsToken = "ACCESS_TOKEN";' +
+      'var sheetsTokenGen = 7; var tokenPending = {}; var accessPending = {};' + src +
+      '\nreturn { doLogout: doLogout, hasUnsavedWork: hasUnsavedWork,' +
+      '  sheetsToken: function () { return sheetsToken; },' +
+      '  gen: function () { return sheetsTokenGen; },' +
+      '  pending: function () { return [tokenPending, accessPending]; },' +
+      '  settingsDirty: function () { return SETTINGS_DIRTY; },' +
+      '  draft: function () { return DRAFT; } };'
+    )(!!o.devMode, setToken, confirmFn, google, STATE, !!o.settingsDirty, o.draft || null, showLogin, closeOverlays);
+    api.env = env;
+    api.STATE = STATE;
+    return api;
+  };
+
+  // (1) 깨끗한 상태: 확인 없이 바로 로그아웃되고 토큰이 실제로 지워진다
+  let h = build({});
+  h.doLogout();
+  check('로그아웃: 확인 대화상자 없음(미저장 변경 없을 때)', h.env.confirms.length === 0);
+  check('로그아웃: ID 토큰 삭제', h.env.stored.idToken === '');
+  check('로그아웃: 메모리 sheetsToken 초기화', h.sheetsToken() === '');
+  check('로그아웃: 토큰 세대 증가', h.gen() === 8);
+  check('로그아웃: 진행 중 토큰 요청 해제', h.pending().every((p) => p === null));
+  check('로그아웃: disableAutoSelect 호출', h.env.autoSelectDisabled === 1);
+  check('로그아웃: 최근 시트(RECENT_KEY) 보존', h.env.stored.recent === 'SHEET_1');
+  check('로그아웃: 로그인 화면 복귀', h.env.login.length === 1 && /로그아웃/.test(h.env.login[0]));
+  check('로그아웃: 오버레이 정리', h.env.overlaysClosed === 1);
+
+  // (2) 진행 중 상태 정리
+  h = build({ state: { plan: { steps: [1] }, undoStack: [{ summary: 'x' }], user: 'me@x.org', setMode: true }, draft: { fixedBlocks: [] } });
+  h.doLogout();   // plan 이 있으므로 confirm → 기본 build 는 confirmYes=false
+  check('로그아웃: 미확정 이동 계획이면 확인 대화상자', h.env.confirms.length === 1 && /저장하지 않은 변경이 있습니다/.test(h.env.confirms[0]));
+  check('로그아웃: 확인 거부하면 토큰 유지', h.env.stored.idToken === 'ID_TOKEN');
+  check('로그아웃: 확인 거부하면 로그인 화면으로 가지 않음', h.env.login.length === 0);
+  check('로그아웃: 확인 거부하면 계획도 유지', h.STATE.plan !== null);
+
+  // (3) 확인 수락 → 진행 중 상태까지 정리된다
+  h = build({ confirmYes: true, state: { plan: { steps: [1] }, undoStack: [{ summary: 'x' }], setMode: true, unavailMode: true }, draft: { fixedBlocks: [] }, settingsDirty: true });
+  h.doLogout();
+  check('로그아웃: 확인 수락 시 ID 토큰 삭제', h.env.stored.idToken === '');
+  check('로그아웃: STATE.plan 정리', h.STATE.plan === null && h.STATE.target === null && h.STATE.planTo === null);
+  check('로그아웃: 되돌리기 스택 비움', h.STATE.undoStack.length === 0);
+  check('로그아웃: 모드 해제', h.STATE.setMode === false && h.STATE.unavailMode === false);
+  check('로그아웃: 사용자 정보 제거', h.STATE.user === '');
+  check('로그아웃: 설정 초안 정리', h.draft() === null && h.settingsDirty() === false);
+
+  // (4) 미저장 판정: 설정 초안 dirty / 불가시간 dirty 도 경고 대상
+  check('미저장 판정: 설정 모달 dirty', build({ settingsDirty: true }).hasUnsavedWork() === true);
+  check('미저장 판정: 불가 시간 dirty', build({ state: { unavailDirty: true } }).hasUnsavedWork() === true);
+  check('미저장 판정: 확정된 이동(undoStack)은 미저장이 아님', build({ state: { undoStack: [{ summary: 'x' }] } }).hasUnsavedWork() === false);
+  check('미저장 판정: 깨끗한 상태', build({}).hasUnsavedWork() === false);
+
+  // (5) DEV_MODE 에서는 아무 일도 하지 않는다
+  h = build({ devMode: true });
+  h.doLogout();
+  check('DEV_MODE: 로그아웃 동작 없음', h.env.stored.idToken === 'ID_TOKEN' && h.env.login.length === 0);
+
+  // (6) GIS 스크립트가 없어도 로그아웃은 끝까지 진행된다
+  h = build({ noGis: true });
+  h.doLogout();
+  check('GIS 미로드: 토큰은 그래도 삭제', h.env.stored.idToken === '' && h.env.login.length === 1);
+
+  // 정적: 버튼 마크업 / 배선 / revoke 금지 / RECENT_KEY 미삭제
+  check('로그아웃 버튼 마크업 존재', /id="btnLogout"/.test(html));
+  check('로그아웃 버튼 클릭 배선', /getElementById\('btnLogout'\)\.addEventListener\('click', doLogout\)/.test(html));
+  check('DEV_MODE 에서 로그아웃 버튼 숨김', /if \(DEV_MODE\) show\('btnLogout', false\)/.test(html));
+  check('구글 계정 권한 revoke 하지 않음', !/accounts\.id\.revoke|revoke\(/.test(html));
+  check('로그아웃이 RECENT_KEY 를 지우지 않음', !/removeItem\(RECENT_KEY\)/.test(html));
+})();
+
+/* =========================================================
    index.html 정적 검증 — 자동 재발급/흰 화면 경로가 남아 있지 않은지
    ========================================================= */
 (function () {
