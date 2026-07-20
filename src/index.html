@@ -74,8 +74,9 @@
   }
   #toolbar button:hover { background: #f4f5f7; border-color: #c3c8cf; }
   #toolbar button:disabled { cursor: default; background: #fafafa; border-color: #e8eaed; }
-  /* 아이콘 버튼(정사각 라운드) — 텍스트 글리프라 CSS 색상 적용 가능 */
-  #toolbar button.tb-icon { width: 32px; padding: 0; font-size: 15px; font-weight: 700; line-height: 1; }
+  /* 아이콘 버튼(정사각 라운드) — 인라인 SVG(stroke: currentColor)라 CSS 색상 적용 가능 */
+  #toolbar button.tb-icon { width: 32px; padding: 0; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
+  #toolbar button.tb-icon svg { display: block; width: 18px; height: 18px; }
   #btnRefresh { color: #2b6cb0; }
   #btnUndo { color: #c05621; }
   #btnUndo:disabled { color: #b9b9b9; }
@@ -457,11 +458,11 @@
   <input id="sheetInput" type="text" placeholder="구글시트 URL 또는 ID">
   <button id="btnOpen" type="button">열기</button>
   <select id="tabSelect"></select>
-  <button id="btnDuplicate" type="button" title="현재 탭을 복제합니다">⧉ 탭 복제</button>
+  <button id="btnDuplicate" type="button" title="현재 탭을 복제합니다">탭 복제</button>
   <span class="tb-sep"></span>
-  <button id="btnRefresh" type="button" class="tb-icon" title="새로고침 — 시트 최신 상태 다시 불러오기">&#x27F3;</button>
-  <button id="btnUndo" type="button" class="tb-icon" title="되돌리기 (Ctrl+Z)" disabled>&#x21A9;</button>
-  <button id="btnSettings" type="button" class="tb-icon" title="설정">⚙️</button>
+  <button id="btnRefresh" type="button" class="tb-icon" title="새로고침 — 시트 최신 상태 다시 불러오기"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.61 9.53A8 8 0 1 1 13.66 4.17"/><path d="M11.61 1.98 13.66 4.17 10.9 5.34"/></svg></button>
+  <button id="btnUndo" type="button" class="tb-icon" title="되돌리기 (Ctrl+Z)" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 19C19.5 11 16 5.5 10.5 5.5S4.6 9.3 3.4 12.8"/><path d="M5.82 11.03 3.4 12.8 2.57 9.92"/></svg></button>
+  <button id="btnSettings" type="button" class="tb-icon" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.04 3.55A8.5 8.5 0 0 1 12.96 3.55L12.76 5.34A6.7 6.7 0 0 1 16.17 6.76L17.29 5.35A8.5 8.5 0 0 1 18.65 6.71L17.24 7.83A6.7 6.7 0 0 1 18.66 11.24L20.45 11.04A8.5 8.5 0 0 1 20.45 12.96L18.66 12.76A6.7 6.7 0 0 1 17.24 16.17L18.65 17.29A8.5 8.5 0 0 1 17.29 18.65L16.17 17.24A6.7 6.7 0 0 1 12.76 18.66L12.96 20.45A8.5 8.5 0 0 1 11.04 20.45L11.24 18.66A6.7 6.7 0 0 1 7.83 17.24L6.71 18.65A8.5 8.5 0 0 1 5.35 17.29L6.76 16.17A6.7 6.7 0 0 1 5.34 12.76L3.55 12.96A8.5 8.5 0 0 1 3.55 11.04L5.34 11.24A6.7 6.7 0 0 1 6.76 7.83L5.35 6.71A8.5 8.5 0 0 1 6.71 5.35L7.83 6.76A6.7 6.7 0 0 1 11.24 5.34Z"/><circle cx="12" cy="12" r="2.5"/></svg></button>
   <span class="tb-sep"></span>
   <button id="btnUnavailMode" type="button" class="tb-mode" title="교사 불가 시간 등록 모드">불가 시간</button>
   <button id="btnRaRows" type="button" class="tb-mode" title="RA행 표시/숨김" aria-pressed="false">RA행</button>
@@ -566,6 +567,10 @@ function showLogin(msg, keepIdToken) {
 var SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 var sheetsToken = '';
 var tokenClient = null;
+/* ID 토큰 재취득용. google.accounts.id 를 그대로 담는다(테스트에서는 가짜를 주입한다).
+ * onIdCredential 이 있으면 새 credential 은 로그인이 아니라 "재취득" 으로 소비된다. */
+var idClient = null;
+var onIdCredential = null;
 
 function gsiLoaded() {
   google.accounts.id.initialize({
@@ -573,9 +578,15 @@ function gsiLoaded() {
     callback: function (resp) {
       // 여기서 access token 을 자동 요청하지 않는다(제스처 소멸 → 팝업 차단).
       // enterApp 이 1회 시도해 보고, 실패하면 복구 가능한 [권한 허용] 버튼을 남긴다.
-      if (resp && resp.credential) { setToken(resp.credential); enterApp(); }
+      var cred = resp && resp.credential;
+      if (!cred) return;
+      // 만료 재취득 대기 중이면 화면을 그대로 둔 채 토큰만 교체한다(작업 상태 보존).
+      if (deliverIdToken(cred)) return;
+      setToken(cred);
+      enterApp();
     }
   });
+  idClient = google.accounts.id;
   google.accounts.id.renderButton(document.getElementById('gsiButton'),
     { theme: 'outline', size: 'large', text: 'signin_with' });
   if (!DEV_MODE && google.accounts.oauth2) {
@@ -594,8 +605,16 @@ function reauthFailMsg(err) {
   if (/popup_closed/.test(m)) return '권한 창이 닫혔습니다. 다시 시도해 주세요.';
   if (/access_denied/.test(m)) return '권한이 거부되었습니다. 계속하려면 권한을 허용해 주세요.';
   if (/sheets_token_timeout/.test(m)) return '권한 창의 응답이 없습니다. 다시 시도해 주세요.';
-  if (/token_client_unavailable/.test(m)) return '구글 인증 스크립트를 불러오지 못했습니다. 새로고침해 주세요.';
+  if (/token_client_unavailable|id_client_unavailable/.test(m)) return '구글 인증 스크립트를 불러오지 못했습니다. 새로고침해 주세요.';
+  if (/id_unavailable/.test(m)) return '로그인을 자동으로 갱신하지 못했습니다. 다시 로그인해 주세요.';
+  if (/id_dismissed/.test(m)) return '로그인 창이 닫혔습니다. 다시 시도해 주세요.';
+  if (/id_token_timeout/.test(m)) return '로그인 창의 응답이 없습니다. 다시 시도해 주세요.';
   return '시트 접근 권한을 받지 못했습니다. 다시 시도해 주세요.';
+}
+
+/* 배너로는 복구할 수 없는 실패(One Tap 자체가 뜨지 못함 / 스크립트 없음) → 로그인 화면 */
+function isUnrecoverableAuth(e) {
+  return /id_unavailable|id_client_unavailable/.test(String((e && e.message) || e || ''));
 }
 
 /* ---------- 재허용 UI (DOM) ----------
@@ -609,13 +628,17 @@ function showReauthBanner(kind, onGrant) {
   var btn = document.getElementById('reauthBtn');
   msgEl.textContent = (kind === 'consent')
     ? '시트 접근 권한(스코프)이 부족합니다. 권한을 다시 허용해 주세요.'
-    : '시트 접근 권한이 만료되었습니다. 작업 내용은 그대로 있습니다 — 다시 허용해 주세요.';
+    : (kind === 'login')
+      ? '로그인이 만료되었습니다. 작업 내용은 그대로 있습니다 — 다시 허용해 주세요.'
+      : '시트 접근 권한이 만료되었습니다. 작업 내용은 그대로 있습니다 — 다시 허용해 주세요.';
   btn.textContent = (kind === 'consent') ? '권한 허용' : '다시 허용';
   btn.disabled = false;
   btn.onclick = function () {
     btn.disabled = true;
     msgEl.textContent = '권한 창을 여는 중입니다…';
     onGrant(kind === 'consent' ? 'consent' : '').catch(function (e) {
+      // 재취득 자체가 불가능하면 배너로 해결할 수 없다 → 로그인 화면(요구사항 4)
+      if (isUnrecoverableAuth(e)) { showLogin(reauthFailMsg(e)); return; }
       btn.disabled = false;
       msgEl.textContent = reauthFailMsg(e);
     });
@@ -631,9 +654,14 @@ function hideReauthBanner() {
  * 테스트가 이 구간을 통째로 추출해 가짜 tokenClient/fetch 만 주입한다.
  * 구간 안에서는 DOM 을 직접 만지지 않는다(showReauthBanner/hideReauthBanner 위임). */
 var SHEETS_TOKEN_TIMEOUT_MS = 60000;  // GIS 가 콜백을 영영 안 부르는 경우 탈출
-var tokenPending = null;              // 진행 중인 토큰 요청(중복 팝업 방지)
-var accessPending = null;             // 진행 중인 "재허용" 대기(중복 배너 방지)
-var sheetsTokenGen = 0;               // 토큰 세대 — 늦게 도착한 401 판별용
+var ID_TOKEN_TIMEOUT_MS = 60000;      // One Tap 이 아무 응답도 주지 않는 경우 탈출
+var tokenPending = null;              // 진행 중인 access 토큰 요청(중복 팝업 방지)
+var idPending = null;                 // 진행 중인 ID 토큰 재취득(중복 One Tap 방지)
+var authPending = null;               // 진행 중인 "재허용" 대기(중복 배너 방지 — 두 토큰 공용)
+var sheetsTokenGen = 0;               // access 토큰 세대 — 늦게 도착한 401 판별용
+var idTokenGen = 0;                   // ID 토큰 세대 — 늦게 도착한 401 판별용
+var sheetsTokenAt = 0;                // access 토큰 발급 시각(ms). 0 = 모름
+var ACCESS_STALE_MS = 50 * 60 * 1000; // 수명 1시간보다 짧게 — 만료 가능성이 있으면 함께 갱신
 
 /* GIS 토큰 요청. 반드시 클릭 제스처 안에서 호출할 것.
  * 진행 중 요청은 공유하고, 콜백이 오지 않으면 타임아웃으로 반드시 settle 한다. */
@@ -655,6 +683,7 @@ function requestSheetsToken(promptMode) {
       if (resp && resp.access_token) {
         sheetsToken = resp.access_token;
         sheetsTokenGen++;
+        sheetsTokenAt = Date.now();
         done(resolve, sheetsToken);
       } else {
         done(reject, new Error((resp && resp.error) || 'sheets_token_failed'));
@@ -672,21 +701,92 @@ function requestSheetsToken(promptMode) {
   return p;
 }
 
+/* GIS 로 ID 토큰(credential JWT)을 다시 받는다.
+ * oauth2 토큰 클라이언트는 access token 만 주고 id_token 은 주지 않으므로,
+ * 새 credential 을 프로그램에서 요청할 수 있는 GIS API 는 One Tap(id.prompt) 뿐이다.
+ * One Tap 은 팝업 창이 아니라 오버레이라 팝업 차단의 영향을 받지 않는다 —
+ * 그래서 같은 클릭 안에서 access 토큰 팝업 뒤에 이어서 호출해도 뜬다.
+ * 새 credential 은 google.accounts.id.initialize 콜백 → deliverIdToken 으로 들어온다. */
+function requestIdToken() {
+  if (DEV_MODE) return Promise.resolve('');
+  if (idPending) return idPending;
+  var settled = false;
+  var timer = null;
+  var p = new Promise(function (resolve, reject) {
+    var done = function (fn, v) {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      idPending = null;
+      onIdCredential = null;   // 늦게 오는 credential 이 죽은 promise 로 흘러가지 않게
+      fn(v);
+    };
+    if (!idClient) { done(reject, new Error('id_client_unavailable')); return; }
+    onIdCredential = function (cred) {
+      if (!cred) { done(reject, new Error('id_token_failed')); return; }
+      setToken(cred);
+      idTokenGen++;
+      done(resolve, cred);
+    };
+    timer = setTimeout(function () { done(reject, new Error('id_token_timeout')); }, ID_TOKEN_TIMEOUT_MS);
+    try {
+      idClient.prompt(function (n) {
+        // FedCM 에서는 isDismissedMoment 만 신뢰할 수 있다(나머지는 미지원).
+        // credential 이 온 경우는 위 콜백이 먼저 settle 하므로 여기서의 reject 는 무시된다.
+        if (!n) return;
+        if (n.isNotDisplayed && n.isNotDisplayed()) { done(reject, new Error('id_unavailable')); return; }
+        if (n.isSkippedMoment && n.isSkippedMoment()) { done(reject, new Error('id_unavailable')); return; }
+        if (n.isDismissedMoment && n.isDismissedMoment()) {
+          var why = n.getDismissedReason ? n.getDismissedReason() : '';
+          if (why !== 'credential_returned') done(reject, new Error('id_dismissed'));
+        }
+      });
+    } catch (e) { done(reject, e); }
+  });
+  p.catch(function () {});
+  if (!settled) idPending = p;
+  return p;
+}
+
+/* GIS 콜백이 준 credential 을 재취득 대기자에게 전달한다. 대기자가 없으면 false(= 최초 로그인). */
+function deliverIdToken(cred) {
+  if (!onIdCredential) return false;
+  var fn = onIdCredential;
+  onIdCredential = null;
+  fn(cred);
+  return true;
+}
+
+/* 한 번의 클릭으로 "필요한 것을 모두" 갱신한다.
+ *  - access 토큰(팝업)을 먼저 — 클릭 제스처가 살아 있어야 팝업이 열린다.
+ *  - ID 토큰(One Tap)은 오버레이라 그 뒤에 이어서 호출해도 뜬다.
+ * 서버가 ID 토큰을 먼저 검사하므로 둘 다 만료면 응답은 항상 kind='login' 이다.
+ * 그래서 login 경로에서 access 토큰도 (발급 시각 기준으로) 함께 갱신하면
+ * 배너 두 번·클릭 두 번이 생기지 않는다. */
+function refreshAuth(kind, promptMode) {
+  var needAccess = (kind === 'expired' || kind === 'consent') ||
+    (!sheetsTokenAt || (Date.now() - sheetsTokenAt) > ACCESS_STALE_MS);
+  var needId = (kind === 'login');
+  var p = needAccess ? requestSheetsToken(promptMode) : Promise.resolve('');
+  return p.then(function (t) { return needId ? requestIdToken() : t; });
+}
+
 /* 재허용 배너를 띄우고, 사용자가 버튼을 눌러 토큰을 받을 때까지 기다린다.
- * 실패해도 reject 하지 않고 배너를 유지한다 → 화면/작업 상태를 잃지 않는다. */
-function awaitSheetsAccess(kind) {
-  if (accessPending) return accessPending;
-  accessPending = new Promise(function (resolve) {
+ * 실패해도 reject 하지 않고 배너를 유지한다 → 화면/작업 상태를 잃지 않는다.
+ * ID 토큰 만료와 시트 권한 만료가 같은 대기(authPending)를 공유한다 → 배너는 항상 하나. */
+function awaitAuth(kind) {
+  if (authPending) return authPending;
+  authPending = new Promise(function (resolve) {
     showReauthBanner(kind, function (promptMode) {
-      return requestSheetsToken(promptMode).then(function (t) {
-        accessPending = null;
+      return refreshAuth(kind, promptMode).then(function (t) {
+        authPending = null;
         hideReauthBanner();
         resolve(t);
         return t;
       });
     });
   });
-  return accessPending;
+  return authPending;
 }
 
 /* =========================================================
@@ -705,31 +805,39 @@ function apiFetch(path, opts) {
   });
 }
 
-/* 시트 접근 권한을 다시 받아야 하는 응답인지: '' | 'expired' | 'consent' */
-function sheetsAccessKind(r) {
+/* 토큰을 다시 받아야 하는 응답인지: '' | 'expired' | 'consent' | 'login'
+ *  expired/consent = 시트 접근(access) 토큰, login = ID 토큰(만료·서명 등)
+ *  missing_token(헤더 자체가 없음)은 재취득 대상이 아니라 로그인 문제다. */
+function authRefreshKind(r) {
   var code = r && r.data && r.data.error;
   if (r && r.status === 401 && (code === 'sheets_token_expired' || code === 'missing_sheets_token')) return 'expired';
   if (r && r.status === 403 && code === 'insufficient_scope') return 'consent';
+  if (r && r.status === 401 && code !== 'missing_token') return 'login';
   return '';
 }
 
-/* 시트 접근 토큰 문제는 자동 재발급하지 않는다(팝업 차단됨).
- *  - 요청 전송 이후 토큰 세대가 올라갔으면 = 이미 갱신됨 → 팝업 없이 새 토큰으로 재시도
- *  - 아니면 재허용 배너를 띄우고, 사용자가 허용한 뒤 원래 요청을 그대로 재시도
- * 그 외 401(ID 토큰 문제) 및 no_access/insufficient_scope 아닌 403(도메인)은 auth 오류로 올린다. */
+/* 토큰 문제는 자동 재발급하지 않는다(팝업 차단됨).
+ *  - 요청 전송 이후 해당 토큰의 세대가 올라갔으면 = 이미 갱신됨 → 팝업 없이 새 토큰으로 재시도
+ *  - 아니면 재허용 배너를 띄우고, 사용자가 허용한 뒤 원래 요청을 그대로 1회 재시도
+ * 재시도는 1회뿐이다 — 그 뒤에도 같은 오류면 오류로 올린다(무한 루프 금지).
+ * no_access/insufficient_scope 아닌 403(도메인)은 auth 오류로 올린다. */
 function apiCall(path, opts) {
-  var gen = sheetsTokenGen;
+  var sGen = sheetsTokenGen;
+  var iGen = idTokenGen;
   return apiFetch(path, opts).then(function (r) {
-    var kind = sheetsAccessKind(r);
+    var kind = authRefreshKind(r);
     if (!kind) return r;
-    if (sheetsTokenGen > gen) return apiFetch(path, opts);   // 늦게 도착한 401 → 팝업 없이 재시도
-    return awaitSheetsAccess(kind).then(function () { return apiFetch(path, opts); });
+    // 늦게 도착한 401 → 이미 갱신된 토큰이 있으므로 팝업 없이 재시도
+    if (kind === 'login' ? (idTokenGen > iGen) : (sheetsTokenGen > sGen)) return apiFetch(path, opts);
+    return awaitAuth(kind).then(function () { return apiFetch(path, opts); });
   }).then(function (r) {
     var code = r.data && r.data.error;
-    // 재허용 후에도 같은 오류 → 로그인 화면으로 튕기지 않고(작업 보존) 별도 오류로 올린다.
-    if (sheetsAccessKind(r)) {
+    var kind = authRefreshKind(r);
+    // 재허용 후에도 시트 권한 오류 → 로그인 화면으로 튕기지 않고(작업 보존) 별도 오류로 올린다.
+    if (kind === 'expired' || kind === 'consent') {
       var e0 = new Error('sheets_access'); e0.sheetsAccess = true; e0.status = r.status; throw e0;
     }
+    // 새 ID 토큰으로도 401 이면 재취득으로 해결되지 않는 문제다 → 로그인 화면
     if (r.status === 401) {
       var e = new Error('auth'); e.auth = true; e.status = 401; throw e;
     }
@@ -887,9 +995,13 @@ function doLogout() {
 
   setToken('');                 // ID 토큰 삭제
   sheetsToken = '';             // 시트 접근 토큰(메모리) 폐기
+  sheetsTokenAt = 0;
   sheetsTokenGen++;             // 진행 중이던 요청이 옛 토큰으로 재시도하지 않도록 세대를 올린다
+  idTokenGen++;                 // ID 토큰도 같은 이유로 세대를 올린다
   tokenPending = null;
-  accessPending = null;
+  idPending = null;
+  authPending = null;
+  onIdCredential = null;        // 늦게 오는 credential 이 로그아웃 상태를 되돌리지 못하게
 
   // 진행 중이던 작업 상태 정리
   STATE.target = null; STATE.plan = null; STATE.planTo = null; STATE.cellMap = null;
@@ -915,8 +1027,17 @@ function bootstrap() {
   }
   return loadSheets().then(function (ok) {
     if (ok === false) return; // no_access
-    return loadState(STATE.sheetId, null);
+    // /api/sheets 가 이미 탭 목록과 isTimetable 을 줬다 → 서버가 다시 헤더를 훑지 않도록 탭을 지정한다.
+    // 서버의 자동 선택 규칙(첫 시간표 형식 탭, 없으면 첫 탭)과 동일하므로 결과는 같고 왕복만 1회 줄어든다.
+    return loadState(STATE.sheetId, firstTimetableTab());
   });
+}
+
+/* 서버 pickTimetableTab 과 같은 규칙: 첫 시간표 형식 탭, 없으면 첫 탭(없으면 null → 서버가 고른다). */
+function firstTimetableTab() {
+  var tabs = STATE.sheets || [];
+  for (var i = 0; i < tabs.length; i++) if (tabs[i].isTimetable) return tabs[i].title;
+  return tabs.length ? tabs[0].title : null;
 }
 
 /* GET /api/sheets → 탭 드롭다운/선택과목 구성. no_access면 false 반환. */
@@ -2393,13 +2514,10 @@ function gradeFreeState(model, config, G, S) {
     subj = String(subj).trim();
     if (!subj) return;
     if (isRaValue(subj)) {                       // RA 감독 값: busy 집계 안 함(반은 free 유지)
-      if (subj === 'RA') { /* legacy 순수 RA: 아무 반도 커버 안 함 */ }
-      else {
-        var _rm = RA_VALUE_RE.exec(subj);
-        if (_rm && _rm[1] != null && parseInt(_rm[1], 10) === G) {
-          if (_rm[2]) raCov[_rm[1] + _rm[2]] = true;   // RA+학년+반 → 반 단위 커버
-          else raGradeCov = true;                       // RA+학년 → 학년 단위(일부) 커버
-        }
+      var _rp = parseRaValue(subj);
+      if (_rp && _rp.grade === G) {
+        if (_rp.cls) raCov[_rp.grade + _rp.cls] = true;   // 반 단위 커버
+        else raGradeCov = true;                            // 학년 단위(일부) 커버
       }
       return;
     }
@@ -2651,8 +2769,42 @@ function renderGradeFreeIfOpen() { if (isGradeFreeOpen()) renderGradeFree(); }
    ========================================================= */
 var RA_UI = null; // { day, period, grade, idx, selCls, perClass }
 
-var RA_VALUE_RE = /^RA(?:(7|8|9|10|11|12)([A-C])?)?$/;
+var RA_VALUE_RE = /^RA(?:(\d{2,})_(7|8|9|10|11|12)([A-C])?|(7|8|9|10|11|12)([A-C])?)?$/;
 function isRaValue(v) { return RA_VALUE_RE.test(String(v == null ? '' : v).trim()); }
+
+// state.js parseRaValue 인라인 미러 — RA 값 파싱(순수). RA 값이 아니면 null.
+function parseRaValue(v) {
+  var s = String(v == null ? '' : v).trim();
+  var m = RA_VALUE_RE.exec(s);
+  if (!m) return null;
+  var seq = m[1] != null ? parseInt(m[1], 10) : null;
+  var gs = m[1] != null ? m[2] : m[4];
+  var cs = m[1] != null ? m[3] : m[5];
+  var grade = gs != null ? parseInt(gs, 10) : null;
+  var cls = cs || null;
+  return { seq: seq, grade: grade, cls: cls, target: gs == null ? '' : (gs + (cs || '')) };
+}
+
+// state.js nextRaSeq 인라인 미러 — 다음 배정 순번(기존 최대 순번+1, 없으면 1).
+function nextRaSeq(model) {
+  var max = 0;
+  ((model && model.entries) || []).forEach(function (e) {
+    if (!e || !e.slots) return;
+    for (var i = 0; i < e.slots.length; i++) {
+      var p = parseRaValue(e.slots[i]);
+      if (p && p.seq != null && p.seq > max) max = p.seq;
+    }
+  });
+  return max + 1;
+}
+
+// state.js formatRaValue 인라인 미러 — 순번+대상 → 값 문자열.
+function formatRaValue(seq, target) {
+  var n = Number(seq);
+  var s = String(n);
+  if (n < 100) s = ('0' + s).slice(-2);
+  return 'RA' + s + '_' + String(target);
+}
 
 // state.js assignCandidates 인라인 미러 (백엔드와 동일 동작 보장)
 function assignCandidates(model, config, idx) {
@@ -2692,10 +2844,11 @@ function raSupBreakdownAt(idx, g) {
   var gradeSups = [], pure = [];
   ((STATE.model && STATE.model.entries) || []).forEach(function (e) {
     if (e.type !== 'teacher') return;
-    var v = String(e.slots[idx] == null ? '' : e.slots[idx]).trim();
-    if (v === 'RA') { pure.push(e.name); return; }
-    if (v === 'RA' + g) { gradeSups.push(e.name); return; }
-    order.forEach(function (c) { if (v === 'RA' + c) byClass[c].push(e.name); });
+    var p = parseRaValue(e.slots[idx]);
+    if (!p) return;
+    if (p.grade == null) { pure.push(e.name); return; }
+    if (p.grade === g && !p.cls) { gradeSups.push(e.name); return; }
+    if (p.grade === g && p.cls && byClass[p.grade + p.cls]) byClass[p.grade + p.cls].push(e.name);
   });
   return { byClass: byClass, gradeSups: gradeSups, pure: pure };
 }
@@ -2739,8 +2892,9 @@ function renderRaAssign() {
   var supByClass = {};
   ((STATE.model && STATE.model.entries) || []).forEach(function (e) {
     if (e.type !== 'teacher') return;
-    var v = String(e.slots[idx] == null ? '' : e.slots[idx]).trim();
-    order.forEach(function (c) { if (v === 'RA' + c) supByClass[c] = e; });
+    var p = parseRaValue(e.slots[idx]);
+    if (!p || !p.target) return;
+    order.forEach(function (c) { if (p.target === c) supByClass[c] = e; });
   });
   // 표시할 반 = 현재 공강 반 ∪ 이미 RA배정된 반
   var showClasses = order.filter(function (c) { return (gf.freeClasses.indexOf(c) !== -1) || supByClass[c]; });
@@ -2770,8 +2924,9 @@ function renderRaAssign() {
     var sup = [];
     ((STATE.model && STATE.model.entries) || []).forEach(function (e) {
       if (e.type !== 'teacher') return;
-      var v = String(e.slots[idx] == null ? '' : e.slots[idx]).trim();
-      if (v === ('RA' + RA_UI.grade) || v === 'RA') sup.push(e);
+      var p = parseRaValue(e.slots[idx]);
+      if (!p) return;
+      if ((p.grade === RA_UI.grade && !p.cls) || p.grade == null) sup.push(e);
     });
     html += '<div class="ra-sec"><b>현재 배정</b>';
     if (sup.length) {
@@ -2797,7 +2952,8 @@ function onRaAssignBodyClick(ev) {
   if (tab) { RA_UI.selCls = tab.dataset.cls; renderRaAssign(); return; }
   var cand = t.closest ? t.closest('.ra-cand') : null;
   if (cand) {
-    var value = RA_UI.perClass ? ('RA' + RA_UI.selCls) : ('RA' + RA_UI.grade);
+    var target = RA_UI.perClass ? RA_UI.selCls : String(RA_UI.grade);
+    var value = formatRaValue(nextRaSeq(STATE.model), target);
     raAssignCell(+cand.dataset.row, RA_UI.idx, value);
     return;
   }

@@ -96,6 +96,33 @@ export async function batchGetValues(sheetsFetch, ranges) {
   return (data.valueRanges || []).map(function (vr) { return vr.values || []; });
 }
 
+// 서로 독립적인 범위들을 1회의 batchGet 으로 합쳐 읽는다.
+// batchGet 은 전부-성공/전부-실패이므로, 실패하면 개별 조회로 한 번만 되돌아간다
+// (추가 순차 깊이 1, 실패 경로에서만). 그래야 "한 범위의 실패가 나머지까지 삼키는" 일이 없다.
+// 반환: ranges 순서의 [{ values, error }] — error 가 있으면 그 범위만 실패한 것.
+export async function batchGetPartial(sheetsFetch, ranges) {
+  var rs = ranges || [];
+  if (!rs.length) return [];
+  try {
+    var vals = await batchGetValues(sheetsFetch, rs);
+    return rs.map(function (_, i) { return { values: vals[i] || [], error: null }; });
+  } catch (_) {
+    return Promise.all(rs.map(function (r) {
+      return batchGetValues(sheetsFetch, [r]).then(
+        function (v) { return { values: v[0] || [], error: null }; },
+        function (err) { return { values: null, error: err }; }
+      );
+    }));
+  }
+}
+
+// 시간표 탭의 그리드 조회 범위. detectLayout 이 찾을 수 있는 slotStartCol 최대값은 12 이므로
+// 슬롯 40개의 끝은 아무리 밀려도 12+39=51열(AY). 넉넉히 A:AY 를 한 번에 읽고 정규화 단계에서 잘라 쓴다
+// (헤더 탐지 → 범위 결정 → 그리드 조회의 순차 의존 제거). 빈 후행 열은 Sheets 가 잘라 돌려주므로 응답은 커지지 않는다.
+export function gridRange(tab) {
+  return "'" + tab + "'!A:" + colLetter(51);
+}
+
 // 값 일괄 기록
 export async function batchUpdateValues(sheetsFetch, data) {
   return sheetsFetch('/values:batchUpdate', {
@@ -136,14 +163,19 @@ export async function deleteSheet(sheetsFetch, sheetId) {
   });
 }
 
-// 시트 복제(insertIndex 위치에 삽입).
-export async function duplicateSheet(sheetsFetch, sourceSheetId, newName, insertIndex) {
+// 시트 복제(insertIndex 위치에 삽입) + 기존 탭 이름 정리를 단일 batchUpdate 로 보낸다.
+// renames: [{ sheetId, to }] — batchUpdate 는 전부-성공/전부-실패이므로
+// "새 탭은 생겼는데 '(최종)' 이동이 실패한" 중간 상태가 남지 않는다.
+// 이름을 먼저 떼고 복제하므로 요청 중간에 이름이 겹치는 순간도 없다.
+export async function duplicateSheet(sheetsFetch, sourceSheetId, newName, insertIndex, renames) {
+  var requests = (renames || []).map(function (r) {
+    return { updateSheetProperties: { properties: { sheetId: r.sheetId, title: r.to }, fields: 'title' } };
+  });
+  requests.push({ duplicateSheet: { sourceSheetId: sourceSheetId, insertSheetIndex: insertIndex, newSheetName: newName } });
   return sheetsFetch(':batchUpdate', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      requests: [{ duplicateSheet: { sourceSheetId: sourceSheetId, insertSheetIndex: insertIndex, newSheetName: newName } }]
-    })
+    body: JSON.stringify({ requests: requests })
   });
 }
 
@@ -186,13 +218,39 @@ export function normalizeGrid(rawGrid, layout) {
   });
 }
 
-// 사본 이름 선택: "{baseTab} (사본N)" — N은 1부터 기존과 겹치지 않는 최소 정수.
-export function nextCopyName(existingTitles, baseTab) {
+// 차수 탭 판별: 정확히 "{N}차" 또는 "{N}차(최종)" 만 대상.
+// 'revised'·'기초자료'·'2차 최종본' 같이 규칙에서 벗어난 이름은 무관 탭으로 두고 건드리지 않는다.
+export function parseStageTab(title) {
+  var m = /^(\d+)차(\(최종\))?$/.exec(String(title == null ? '' : title));
+  return m ? { n: parseInt(m[1], 10), final: !!m[2] } : null;
+}
+
+// 탭 복제 이름 계산(순수). 원본이 몇 차인지와 무관하게 항상 맨 끝 차수를 새로 만든다.
+//  - 새 이름 = (기존 차수 탭의 최대 차수 + 1) + '차(최종)'. 차수 탭이 하나도 없으면 '1차(최종)'.
+//  - 기존 '(최종)' 탭에서는 접미사를 뗀다. 단 뗀 이름이 이미 있으면 충돌이므로 그대로 둔다.
+// 반환 { newName, renames: [{ from, to }] }
+export function nextStageNames(existingTitles) {
+  var titles = (existingTitles || []).map(function (t) { return String(t); });
   var set = {};
-  (existingTitles || []).forEach(function (t) { set[t] = true; });
-  var n = 1;
-  while (set[baseTab + ' (사본' + n + ')']) n++;
-  return baseTab + ' (사본' + n + ')';
+  titles.forEach(function (t) { set[t] = true; });
+  var max = 0;
+  titles.forEach(function (t) {
+    var p = parseStageTab(t);
+    if (p && p.n > max) max = p.n;
+  });
+  var n = max + 1;
+  // 규칙상 max+1 차 탭은 존재할 수 없지만(존재하면 max 가 그 값이다), 방어적으로 빈 차수까지 올린다.
+  while (set[n + '차(최종)']) n++;
+  var newName = n + '차(최종)';
+  var renames = [];
+  titles.forEach(function (t) {
+    var p = parseStageTab(t);
+    if (!p || !p.final) return;
+    var to = p.n + '차';
+    if (set[to] || to === newName) return;
+    renames.push({ from: t, to: to });
+  });
+  return { newName: newName, renames: renames };
 }
 
 // values(2D) 를 폭 colCount 로 정규화한다. 짧은 행은 ''로 패딩, 긴 행은 잘라낸다.

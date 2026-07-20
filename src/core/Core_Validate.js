@@ -52,7 +52,7 @@ function expandTargets(subject, config) {
   return res;
 }
 function expandTargetsUncached(subject, config) {
-  if (/^RA(?:7|8|9|10|11|12)?$/.test(String(subject).trim())) return { classes: [], parsed: false, mapped: false, unclassified: false, partialGrades: [] };
+  if (/^RA(?:\d{2,}_)?(?:7|8|9|10|11|12)?$/.test(String(subject).trim())) return { classes: [], parsed: false, mapped: false, unclassified: false, partialGrades: [] };
   var p = _parseSubject(subject);
   if (p) return { classes: [{ grade: p.grade, cls: p.cls }], parsed: true, mapped: false, unclassified: false, partialGrades: [] };
   var classless = (config && config.classless) || {};

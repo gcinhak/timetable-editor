@@ -6,9 +6,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { slotColLetter, cellsToBatchData, hashGrid, hashValues, lastDataRow, parseLinkedGroups, deriveClasslessFromGrades, detectLayout, normalizeGrid, colLetter, makeSheetsFetch, resolveSheetId, sheetsErrorStatus, mapSheetsError, overwriteSheetRange, padRows } from '../src/lib/sheets.js';
+import { slotColLetter, cellsToBatchData, hashGrid, hashValues, lastDataRow, parseLinkedGroups, deriveClasslessFromGrades, detectLayout, normalizeGrid, colLetter, makeSheetsFetch, resolveSheetId, sheetsErrorStatus, mapSheetsError, overwriteSheetRange, padRows, parseStageTab, nextStageNames } from '../src/lib/sheets.js';
 import { signJwtRS256, verifyIdToken } from '../src/lib/google-auth.js';
-import { readConfigSafe, readConfigWithVersion, resolveApplyTab, nonTeacherRows, incompleteUnits, historyKindLabel, deptBoundaries, parseDepts, gradeSlotState, toggleGradeSlot, gradeFreeState, assignCandidates, raOpError, isRaValue, RA_VALUE_RE, raFreeCellLabel, subjectGradeTargets, gradeSubjectIndex } from '../src/lib/state.js';
+import { readConfigSafe, readConfigWithVersion, resolveApplyTab, nonTeacherRows, incompleteUnits, historyKindLabel, deptBoundaries, parseDepts, gradeSlotState, toggleGradeSlot, gradeFreeState, assignCandidates, raOpError, isRaValue, RA_VALUE_RE, parseRaValue, nextRaSeq, formatRaValue, raFreeCellLabel, subjectGradeTargets, gradeSubjectIndex } from '../src/lib/state.js';
 import { getMockStore, resetMockStore, mockPickTab, applyCellsToGrid, mockDuplicateTab, mockSaveConfig, mockListTabs } from '../src/dev/mock_store.js';
 
 // 코어(CJS 가드형)를 worker/브라우저와 동일하게 텍스트 연결 → new Function 로드.
@@ -443,12 +443,51 @@ await (async function () {
   resetMockStore();
   const s2 = getMockStore();
   const dupName = mockDuplicateTab(s2, 'revised');
-  check("사본 이름 'revised (사본1)'", dupName === 'revised (사본1)');
+  check("사본 이름 '3차(최종)'(기존 1차·2차 뒤 차수)", dupName === '3차(최종)');
   check('사본 탭 생성됨', !!s2.sheets[dupName]);
   check('사본 == revised 스냅샷',
     JSON.stringify(s2.sheets[dupName]) === JSON.stringify(s2.sheets.revised));
   s2.sheets[dupName][2][2] = '__X__';
   check('사본 수정이 revised 에 전이되지 않음(딥카피)', s2.sheets.revised[2][2] !== '__X__');
+
+  // (5) 연속 복제: 차수가 오르고 '(최종)' 이 매번 마지막 탭으로 옮겨간다
+  resetMockStore();
+  const s3 = getMockStore();
+  check('1회차 복제 → 3차(최종)', mockDuplicateTab(s3, 'revised') === '3차(최종)');
+  check('2회차 복제 → 4차(최종)', mockDuplicateTab(s3, '1차') === '4차(최종)');
+  check("2회차 후 3차 의 '(최종)' 떨어짐", !!s3.sheets['3차'] && !s3.sheets['3차(최종)']);
+  check('3회차 복제 → 5차(최종)', mockDuplicateTab(s3, 'revised') === '5차(최종)');
+  check("3회차 후 '(최종)' 은 5차 하나뿐",
+    Object.keys(s3.sheets).filter(function (t) { return /\(최종\)$/.test(t); }).join() === '5차(최종)');
+  check('무관 탭 revised 는 그대로 남음', !!s3.sheets.revised);
+}
+
+/* =========================================================
+   6-2. 차수 탭 이름 규칙 (parseStageTab / nextStageNames)
+   ========================================================= */
+{
+  check('parseStageTab 0차', eq(parseStageTab('0차'), { n: 0, final: false }));
+  check('parseStageTab 12차(최종)', eq(parseStageTab('12차(최종)'), { n: 12, final: true }));
+  check('parseStageTab revised → null', parseStageTab('revised') === null);
+  check('parseStageTab 기초자료 → null', parseStageTab('기초자료') === null);
+  check("parseStageTab '2차 최종본' → null(규칙 불일치)", parseStageTab('2차 최종본') === null);
+  check("parseStageTab '3차 (최종)' → null(공백 있음)", parseStageTab('3차 (최종)') === null);
+
+  const names = function (t) { return nextStageNames(t); };
+  check('차수 탭 없음 → 1차(최종), 이름변경 없음',
+    eq(names(['revised', '기초자료']), { newName: '1차(최종)', renames: [] }));
+  check('0차만 → 1차(최종)', eq(names(['0차']), { newName: '1차(최종)', renames: [] }));
+  check('0·1차 → 2차(최종)', eq(names(['revised', '0차', '1차']), { newName: '2차(최종)', renames: [] }));
+  check("1차 복제인데 2차 존재 → 3차(최종)(원본 무관)",
+    eq(names(['0차', '1차', '2차']), { newName: '3차(최종)', renames: [] }));
+  check("'(최종)' 붙은 탭도 같은 차수로 인식 + 접미사 이동",
+    eq(names(['1차', '2차(최종)']), { newName: '3차(최종)', renames: [{ from: '2차(최종)', to: '2차' }] }));
+  check('무관 탭은 이름변경 대상에서 제외',
+    eq(names(['revised', '2차 최종본', '1차(최종)']),
+      { newName: '2차(최종)', renames: [{ from: '1차(최종)', to: '1차' }] }));
+  check("충돌: '2차' 가 이미 있으면 '2차(최종)' 은 건드리지 않는다",
+    eq(names(['2차', '2차(최종)']), { newName: '3차(최종)', renames: [] }));
+  check('10차 이상도 사전순이 아닌 수치 비교', eq(names(['9차', '10차']).newName, '11차(최종)'));
 }
 
 /* =========================================================
@@ -1052,6 +1091,7 @@ await (async function () {
     + fnSrc(html, 'gradeFreeState') + '\n' + fnSrc(html, 'subjectGradeTargets') + '\n'
     + fnSrc(html, 'gradeSubjectIndex') + '\n' + fnSrc(html, 'raFreeCellLabel') + '\n'
     + fnSrc(html, 'ghState') + '\n' + fnSrc(html, 'ghPartClasses') + '\n'
+    + fnSrc(html, 'parseRaValue') + '\n'
     + fnSrc(html, 'esc');
   const cell = new Function('STATE', 'RA_VALUE_RE', 'isRaValue', 'raSupBreakdownAt', 'GF_SUBJECT_RE2', 'SLOT_COUNT', 'GF_SUBJ_MAX',
     src + '\nreturn gradeFreeCellHtml;')(
@@ -1471,6 +1511,57 @@ await (async function () {
   // (13) core: RA12(학년 단위)는 미분류 아님 (동기화된 src/core 의존)
   const ra12Model = CORE.buildModel([dataRow('T', { 0: 'RA12' })], 3);
   check('RA12 셀은 unclassified 아님', !CORE.findConflicts(ra12Model, baseCfg).some((c) => c.type === 'unclassified' && c.subject === 'RA12'));
+
+  // (14) 신 값 형식 RA{순번2자리}_{대상} — formatRaValue / parseRaValue / nextRaSeq
+  check("formatRaValue(1,'11A')==='RA01_11A'", formatRaValue(1, '11A') === 'RA01_11A');
+  check("formatRaValue(2,'7C')==='RA02_7C'", formatRaValue(2, '7C') === 'RA02_7C');
+  check("formatRaValue(3,'12')==='RA03_12'", formatRaValue(3, '12') === 'RA03_12');
+  check("formatRaValue(100,'8')==='RA100_8'", formatRaValue(100, '8') === 'RA100_8');
+
+  check("parseRaValue('RA01_11A')", eq(parseRaValue('RA01_11A'), { seq: 1, grade: 11, cls: 'A', target: '11A' }));
+  check("parseRaValue('RA03_12')", eq(parseRaValue('RA03_12'), { seq: 3, grade: 12, cls: null, target: '12' }));
+  check("parseRaValue('RA100_7C')", eq(parseRaValue('RA100_7C'), { seq: 100, grade: 7, cls: 'C', target: '7C' }));
+  check("parseRaValue legacy 'RA11B'", eq(parseRaValue('RA11B'), { seq: null, grade: 11, cls: 'B', target: '11B' }));
+  check("parseRaValue legacy 'RA12'", eq(parseRaValue('RA12'), { seq: null, grade: 12, cls: null, target: '12' }));
+  check("parseRaValue legacy 'RA'", eq(parseRaValue('RA'), { seq: null, grade: null, cls: null, target: '' }));
+  check("parseRaValue('XYZ')===null", parseRaValue('XYZ') === null);
+  check("parseRaValue('RA1_11A')===null(순번 1자리)", parseRaValue('RA1_11A') === null);
+  check("parseRaValue('RA13A')===null", parseRaValue('RA13A') === null);
+  check("isRaValue('RA01_11A')===true", isRaValue('RA01_11A') === true);
+
+  check('nextRaSeq 빈 모델 → 1', nextRaSeq({ entries: [] }) === 1);
+  check('nextRaSeq RA01_11A·RA05_12 → 6',
+    nextRaSeq(CORE.buildModel([dataRow('A', { 0: 'RA01_11A' }), dataRow('B', { 1: 'RA05_12' })], 3)) === 6);
+  check('nextRaSeq legacy 값만(RA11B) → 1', nextRaSeq(CORE.buildModel([dataRow('A', { 0: 'RA11B' })], 3)) === 1);
+  check('nextRaSeq RA100_8 → 101', nextRaSeq(CORE.buildModel([dataRow('A', { 0: 'RA100_8' })], 3)) === 101);
+
+  // (15) raOpError — 신 형식 값 + target 기준 중복
+  const nvModel = CORE.buildModel([dataRow('T', { 2: 'Kor7A' })], 3);
+  check('raOpError value=RA01_11A 빈 슬롯 → null', raOpError(nvModel, [{ row: 3, idx: 0, value: 'RA01_11A' }], []) === null);
+  check('raOpError value=RA1_11A → invalid_value/400', eq(raOpError(nvModel, [{ row: 3, idx: 0, value: 'RA1_11A' }], []), { error: 'invalid_value', status: 400 }));
+  const dupNew = CORE.buildModel([dataRow('A', { 0: 'RA07_11B' }), dataRow('B', {})], 3);
+  check('raOpError 신형식 같은 반 중복(순번 달라도) → duplicate_ra/409',
+    eq(raOpError(dupNew, [{ row: 4, idx: 0, value: 'RA09_11B' }], []), { error: 'duplicate_ra', status: 409 }));
+  const dupLegacyNew = CORE.buildModel([dataRow('A', { 0: 'RA11B' }), dataRow('B', {})], 3);
+  check('raOpError legacy RA11B vs 신형식 RA09_11B → duplicate_ra/409',
+    eq(raOpError(dupLegacyNew, [{ row: 4, idx: 0, value: 'RA09_11B' }], []), { error: 'duplicate_ra', status: 409 }));
+  const dupNewG = CORE.buildModel([dataRow('A', { 0: 'RA03_12' }), dataRow('B', {})], 3);
+  check('raOpError 신형식 학년 단위 공동감독 → null', raOpError(dupNewG, [{ row: 4, idx: 0, value: 'RA09_12' }], []) === null);
+  const clrNew = CORE.buildModel([dataRow('T', { 0: 'RA01_11A', 2: 'Kor7A' })], 3);
+  check('raOpError RA01_11A 셀 해제 → null', raOpError(clrNew, [], [{ row: 3, idx: 0 }]) === null);
+
+  // (16) gradeFreeState 가 신형식 값을 반 커버로 인식
+  const gfNew = gradeFreeState(CORE.buildModel([dataRow('T', { 0: 'RA01_11A' })], 3), baseCfg, 11, { day: 0, period: 1 });
+  check('gradeFree RA01_11A → raClasses 11A 포함', gfNew.raClasses.indexOf('11A') !== -1);
+  check('gradeFree RA01_11A → 11A busy 아님', gfNew.busyClasses.indexOf('11A') === -1);
+  const gfNewAll = gradeFreeState(
+    CORE.buildModel([dataRow('A', { 0: 'RA01_11A' }), dataRow('B', { 0: 'RA02_11B' }), dataRow('C', { 0: 'RA03_11C' })], 3),
+    baseCfg, 11, { day: 0, period: 1 });
+  check('gradeFree 신형식 전 반 배정 → covered true', gfNewAll.covered === true);
+  const gfNewPart = gradeFreeState(
+    CORE.buildModel([dataRow('S', { 4: 'AP Statistics' }), dataRow('R', { 4: 'RA04_12' })], 3),
+    Object.assign({}, baseCfg, { classless: { 'AP Statistics': ['12일부'] } }), 12, { day: 0, period: 5 });
+  check('gradeFree partial + RA04_12 → covered true', gfNewPart.kind === 'partial' && gfNewPart.covered === true);
 }
 
 /* =========================================================
@@ -1664,7 +1755,7 @@ await (async function () {
 
 /* =========================================================
    클라이언트 토큰 계층(index.html @token-layer)
-   — GIS 토큰 클라이언트만 가짜로 주입하고 requestSheetsToken/awaitSheetsAccess/apiCall 은
+   — GIS 토큰 클라이언트만 가짜로 주입하고 requestSheetsToken/requestIdToken/awaitAuth/apiCall 은
      실제 코드를 그대로 실행한다(스텁으로 대체하지 않는다).
    ========================================================= */
 await (async function () {
@@ -1698,9 +1789,33 @@ await (async function () {
     return function (c, n) { setTimeout(function () { c.callback({ access_token: (prefix || 'NEW') + n }); }, 0); };
   };
 
+  /* 가짜 One Tap(google.accounts.id). prompt(momentListener) 가 어떻게 반응할지 behavior 가 정한다.
+   * 실제 GIS 처럼 credential 은 initialize 콜백(=deliverIdToken)으로 들어온다. */
+  const makeIdClient = function (behavior) {
+    const c = { prompts: [] };
+    c.prompt = function (listener) {
+      c.prompts.push(listener);
+      behavior(c, c.prompts.length, listener);
+    };
+    return c;
+  };
+  /* n 번째 prompt 마다 새 credential 을 돌려주는 기본 동작(비동기) */
+  const issues = function (prefix) {
+    return function (c, n) { setTimeout(function () { c.deliver((prefix || 'NEWID') + n); }, 0); };
+  };
+  const moment = function (o) {
+    return {
+      isNotDisplayed: function () { return !!o.notDisplayed; },
+      isSkippedMoment: function () { return !!o.skipped; },
+      isDismissedMoment: function () { return !!o.dismissed; },
+      getDismissedReason: function () { return o.reason || ''; }
+    };
+  };
+
   /* 토큰 계층을 실제로 실행하는 하네스. DOM 은 배너 대역(fake)으로만 대체한다. */
-  const build = function (fetchImpl, client, timeoutMs) {
+  const build = function (fetchImpl, client, timeoutMs, idClient) {
     const banner = { shown: [], hidden: 0, grant: null, lastErr: null };
+    const store = { idToken: 'ID_TOKEN' };
     const showReauthBanner = function (kind, onGrant) {
       banner.shown.push(kind);
       // 실제 배너처럼: 버튼 클릭 시에만 onGrant 가 호출된다.
@@ -1711,15 +1826,23 @@ await (async function () {
     };
     const hideReauthBanner = function () { banner.hidden++; };
     const api = new Function(
-      'DEV_MODE', 'getToken', 'fetch', 'tokenClient', 'showReauthBanner', 'hideReauthBanner', 'timeoutMs',
+      'DEV_MODE', 'getToken', 'setToken', 'fetch', 'tokenClient', 'idClient', 'onIdCredential',
+      'showReauthBanner', 'hideReauthBanner', 'timeoutMs',
       'var sheetsToken = "OLD";' + src +
-      '\nif (timeoutMs) SHEETS_TOKEN_TIMEOUT_MS = timeoutMs;' +
+      '\nif (timeoutMs) { SHEETS_TOKEN_TIMEOUT_MS = timeoutMs; ID_TOKEN_TIMEOUT_MS = timeoutMs; }' +
       '\nreturn { apiCall: apiCall, apiFetch: apiFetch, requestSheetsToken: requestSheetsToken,' +
+      '  requestIdToken: requestIdToken, deliverIdToken: deliverIdToken,' +
       '  gen: function () { return sheetsTokenGen; }, token: function () { return sheetsToken; },' +
+      '  idGen: function () { return idTokenGen; },' +
+      '  setAccessAt: function (t) { sheetsTokenAt = t; },' +
+      '  idPending: function () { return !!idPending; },' +
       '  pending: function () { return !!tokenPending; } };'
-    )(false, function () { return 'ID_TOKEN'; }, fetchImpl, client, showReauthBanner, hideReauthBanner, timeoutMs);
+    )(false, function () { return store.idToken; }, function (t) { store.idToken = t || ''; },
+      fetchImpl, client, idClient || null, null, showReauthBanner, hideReauthBanner, timeoutMs);
     api.banner = banner;
     api.client = client;
+    api.store = store;
+    if (idClient) idClient.deliver = api.deliverIdToken;
     return api;
   };
 
@@ -1899,14 +2022,189 @@ await (async function () {
   r = await p1;
   check('missing_sheets_token → 재허용 후 재시도 성공', calls.length === 2 && r.status === 200);
 
-  // (12) ID 토큰 문제(401 invalid_token)는 팝업/배너 없이 즉시 로그인 만료 처리
+  // (12) ID 토큰 만료(401 invalid_token) → 로그인 화면으로 튕기지 않고 같은 배너로 복구
   calls = [];
-  h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(401, { ok: false, error: 'invalid_token' }); },
-    makeClient(grants()));
+  let idc = makeIdClient(issues());
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'invalid_token' }) : resp(200, { ok: true });
+  }, makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());        // access 토큰은 방금 받아 아직 유효
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  check('invalid_token → 재허용 배너(login) 노출', h.banner.shown.length === 1 && h.banner.shown[0] === 'login');
+  check('invalid_token → 클릭 전 One Tap 없음', idc.prompts.length === 0);
+  check('invalid_token → 클릭 전 재시도 없음', calls.length === 1);
+  await h.banner.grant();           // 사용자가 [다시 허용] 클릭
+  r = await p1;
+  check('클릭 후 → One Tap 1회', idc.prompts.length === 1);
+  check('클릭 후 → 원래 요청을 1회만 재시도', calls.length === 2 && calls[1].path === '/api/state');
+  check('재시도는 새 ID 토큰 사용', calls[1].opts.headers['Authorization'] === 'Bearer NEWID1');
+  check('새 ID 토큰이 저장된다', h.store.idToken === 'NEWID1');
+  check('ID 토큰 세대 증가', h.idGen() === 1);
+  check('access 토큰이 신선하면 시트 팝업은 열지 않는다', h.client.calls.length === 0);
+  check('재시도 성공 시 정상 응답 반환', r.status === 200 && r.data.ok === true);
+  check('성공 후 배너 숨김', h.banner.hidden >= 1);
+
+  // (12b) ID 토큰 만료 재시도에서도 POST 의 method/body/헤더가 보존된다
+  calls = [];
+  idc = makeIdClient(issues());
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'expired' }) : resp(200, { ok: true });
+  }, makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());
+  p1 = h.apiCall('/api/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: bodyStr });
+  await tick(5);
+  await h.banner.grant();
+  r = await p1;
+  check('ID 만료 POST 재시도 → method 보존', calls[1].opts.method === 'POST');
+  check('ID 만료 POST 재시도 → body 원문 보존', calls[1].opts.body === bodyStr);
+  check('ID 만료 POST 재시도 → 호출자 헤더 보존', calls[1].opts.headers['content-type'] === 'application/json');
+  check('ID 만료 POST 재시도 → 경로 보존', calls[1].path === '/api/apply');
+
+  // (12c) 두 토큰 동시 만료: 서버가 ID 토큰을 먼저 보므로 응답은 invalid_token 하나뿐 —
+  //       배너도 하나, 클릭도 한 번으로 둘 다 갱신되어야 한다(두 번째 배너 금지).
+  calls = [];
+  idc = makeIdClient(issues());
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    if (o.headers['Authorization'] !== 'Bearer NEWID1') return resp(401, { ok: false, error: 'expired' });
+    if (o.headers['X-Sheets-Token'] === 'OLD') return resp(401, { ok: false, error: 'sheets_token_expired' });
+    return resp(200, { ok: true });
+  }, makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now() - 55 * 60 * 1000);   // access 토큰도 만료 가능 시점
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  check('동시 만료 → 배너는 하나만', h.banner.shown.length === 1 && h.banner.shown[0] === 'login');
+  await h.banner.grant();
+  r = await p1;
+  check('동시 만료 → 한 번의 클릭으로 두 토큰 모두 갱신',
+    idc.prompts.length === 1 && h.client.calls.length === 1);
+  check('동시 만료 → 배너가 다시 뜨지 않음', h.banner.shown.length === 1);
+  check('동시 만료 → 재시도 1회로 성공', calls.length === 2 && r.status === 200);
+  check('동시 만료 → 재시도에 두 새 토큰이 모두 실림',
+    calls[1].opts.headers['Authorization'] === 'Bearer NEWID1' &&
+    calls[1].opts.headers['X-Sheets-Token'] === 'NEW1');
+
+  // (12d) 동시 401 두 건(ID 만료) → 배너 1회, One Tap 1회, 각자 재시도
+  calls = [];
+  idc = makeIdClient(issues());
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return o.headers['Authorization'] === 'Bearer ID_TOKEN' ? resp(401, { ok: false, error: 'expired' }) : resp(200, { ok: true });
+  }, makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());
+  const bothId = Promise.all([h.apiCall('/api/state'), h.apiCall('/api/sheets')]);
+  await tick(5);
+  check('ID 만료 동시 401 → 배너 1회만', h.banner.shown.length === 1);
+  await h.banner.grant();
+  const rsId = await bothId;
+  check('ID 만료 동시 401 → One Tap 1회만', idc.prompts.length === 1);
+  check('ID 만료 동시 401 → 두 요청 모두 재시도 성공', rsId[0].status === 200 && rsId[1].status === 200);
+  check('ID 만료 동시 401 → 총 4회 호출(각 2회)', calls.length === 4);
+
+  // (12e) 늦게 도착한 invalid_token → 세대 카운터로 판별해 배너 없이 즉시 재시도
+  calls = [];
+  releaseFirst = null;
+  idc = makeIdClient(issues());
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    if (calls.length === 1) return new Promise(function (res) { releaseFirst = res; });
+    return resp(200, { ok: true });
+  }, makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  await h.requestIdToken();                 // 다른 경로에서 ID 토큰 갱신 → idGen 1
+  check('ID 토큰 별도 갱신으로 세대 증가', h.idGen() === 1);
+  releaseFirst(resp(401, { ok: false, error: 'expired' }));   // 늦은 401 도착
+  r = await p1;
+  check('늦은 invalid_token → 추가 One Tap 없음', idc.prompts.length === 1);
+  check('늦은 invalid_token → 배너 없음', h.banner.shown.length === 0);
+  check('늦은 invalid_token → 새 토큰으로 즉시 재시도',
+    calls.length === 2 && calls[1].opts.headers['Authorization'] === 'Bearer NEWID1');
+
+  // (12f) 재취득 후에도 401 → 재시도는 1회뿐이고 그때는 auth 오류(로그인 화면)
+  calls = [];
+  idc = makeIdClient(issues());
+  h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(401, { ok: false, error: 'expired' }); },
+    makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());
+  caught = null;
+  p1 = h.apiCall('/api/state').catch(function (e) { caught = e; });
+  await tick(5);
+  await h.banner.grant();
+  await p1;
+  check('재취득 후에도 401 → auth 401(로그인 화면)', !!caught && caught.auth === true && caught.status === 401);
+  check('ID 만료 재시도는 1회뿐(총 2회 호출)', calls.length === 2 && idc.prompts.length === 1);
+
+  // (12g) One Tap 이 뜨지 못하면(id_unavailable) 배너로 복구 불가 → 로그인 화면행 오류로 알린다
+  calls = [];
+  idc = makeIdClient(function (c, n, listener) {
+    setTimeout(function () { listener(moment({ notDisplayed: true })); }, 0);
+  });
+  h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(401, { ok: false, error: 'expired' }); },
+    makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());
+  p1 = h.apiCall('/api/state');
+  p1.catch(function () {});
+  await tick(5);
+  caught = null;
+  try { await h.banner.grant(); } catch (e) { caught = e; }
+  check('One Tap 미표시 → id_unavailable 오류 전달', !!caught && /id_unavailable/.test(caught.message));
+  check('One Tap 미표시 → 원 요청은 재시도되지 않음', calls.length === 1);
+  check('One Tap 미표시 → pending 잔류 없음', h.idPending() === false);
+
+  // (12h) One Tap 을 사용자가 닫으면(dismiss) 배너는 유지되고 다시 클릭해 복구할 수 있다
+  calls = [];
+  let idAttempt = 0;
+  idc = makeIdClient(function (c, n, listener) {
+    idAttempt = n;
+    setTimeout(function () {
+      if (n === 1) listener(moment({ dismissed: true, reason: 'cancel_called' }));
+      else c.deliver('ID_AFTER_CANCEL');
+    }, 0);
+  });
+  h = build(async function (p, o) {
+    calls.push({ path: p, opts: o });
+    return calls.length === 1 ? resp(401, { ok: false, error: 'expired' }) : resp(200, { ok: true });
+  }, makeClient(grants()), 0, idc);
+  h.setAccessAt(Date.now());
+  p1 = h.apiCall('/api/state');
+  await tick(5);
+  caught = null;
+  try { await h.banner.grant(); } catch (e) { caught = e; }
+  check('One Tap 취소 → id_dismissed 오류(배너가 안내 갱신 가능)', !!caught && /id_dismissed/.test(caught.message));
+  check('One Tap 취소 → 배너 숨겨지지 않음', h.banner.hidden === 0);
+  await h.banner.grant();
+  r = await p1;
+  check('One Tap 재클릭 성공 → 원래 요청 재개', calls.length === 2 && r.status === 200 && idAttempt === 2);
+  check('One Tap 재클릭 성공 → 새 ID 토큰 사용', calls[1].opts.headers['Authorization'] === 'Bearer ID_AFTER_CANCEL');
+
+  // (12i) credential 이 영영 오지 않아도 타임아웃으로 빠져나온다(영구 pending 금지)
+  idc = makeIdClient(function () { /* 아무 응답도 없음 */ });
+  h = build(async function () { return resp(200, { ok: true }); }, makeClient(grants()), 25, idc);
+  caught = null;
+  try { await h.requestIdToken(); } catch (e) { caught = e; }
+  check('One Tap 무응답 → 타임아웃으로 reject', !!caught && /id_token_timeout/.test(caught.message));
+  check('One Tap 타임아웃 후 pending 해제', h.idPending() === false);
+
+  // (12j) idClient 가 없으면 즉시 reject — 영구 pending 금지
+  h = build(async function () { return resp(200, { ok: true }); }, makeClient(grants()), 25, null);
+  caught = null;
+  try { await h.requestIdToken(); } catch (e) { caught = e; }
+  check('idClient 없음 → 즉시 reject', !!caught && /id_client_unavailable/.test(caught.message));
+
+  // (12k) missing_token(헤더 자체가 없음)은 재취득 대상이 아니다 → 배너 없이 auth 401
+  calls = [];
+  idc = makeIdClient(issues());
+  h = build(async function (p, o) { calls.push({ path: p, opts: o }); return resp(401, { ok: false, error: 'missing_token' }); },
+    makeClient(grants()), 0, idc);
   caught = null;
   try { await h.apiCall('/api/state'); } catch (e) { caught = e; }
-  check('invalid_token → 재시도/팝업 없음', calls.length === 1 && h.client.calls.length === 0 && h.banner.shown.length === 0);
-  check('invalid_token → auth 401', !!caught && caught.auth === true && caught.status === 401);
+  check('missing_token → 재시도/배너 없음', calls.length === 1 && h.banner.shown.length === 0 && idc.prompts.length === 0);
+  check('missing_token → auth 401', !!caught && caught.auth === true && caught.status === 401);
 
   // (13) no_access(403) / not_found(404) 는 throw 하지 않고 본문을 그대로 넘긴다
   h = build(async function () { return resp(403, { ok: false, error: 'no_access', reasons: ['권한 없음'] }); }, makeClient(grants()));
@@ -2158,7 +2456,9 @@ await (async function () {
   check('D3 logError 헬퍼 존재', /function logError\(/.test(w));
   check('D3 console.error 사용', /console\.error\(/.test(w));
   check('D3 mapSheetsError 직전 로깅', /logError\('sheets_api'/.test(w));
-  ['readConfigWithVersion', 'readLinkedPinned', 'electives(연결그룹)', 'electives(선택과목코드)', 'parseDepts', 'dev_handler']
+  // 합쳐 읽기 도입 후: 조회 실패는 readSide 가 'side:<key>' 로, 파싱 실패는 각 사이트가 로깅한다
+  check('D3 합쳐 읽기의 범위별 실패 로깅', /logError\('side:'\s*\+/.test(w));
+  ['readConfigWithVersion', 'readLinkedPinned', 'electives', 'parseDepts', 'dev_handler']
     .forEach(function (site) {
       check('D3 무음 catch 로깅: ' + site, w.indexOf("logError('" + site + "'") > -1);
     });
@@ -2206,12 +2506,15 @@ await (async function () {
 
     const api = new Function(
       'DEV_MODE', 'setToken', 'confirm', 'google', 'STATE', 'SETTINGS_DIRTY', 'DRAFT', 'showLogin', 'closeOverlays',
-      'var sheetsToken = "ACCESS_TOKEN";' +
-      'var sheetsTokenGen = 7; var tokenPending = {}; var accessPending = {};' + src +
+      'var sheetsToken = "ACCESS_TOKEN"; var sheetsTokenAt = 12345; var onIdCredential = function () {};' +
+      'var sheetsTokenGen = 7; var idTokenGen = 3;' +
+      'var tokenPending = {}; var idPending = {}; var authPending = {};' + src +
       '\nreturn { doLogout: doLogout, hasUnsavedWork: hasUnsavedWork,' +
       '  sheetsToken: function () { return sheetsToken; },' +
       '  gen: function () { return sheetsTokenGen; },' +
-      '  pending: function () { return [tokenPending, accessPending]; },' +
+      '  idGen: function () { return idTokenGen; },' +
+      '  idCb: function () { return onIdCredential; },' +
+      '  pending: function () { return [tokenPending, idPending, authPending]; },' +
       '  settingsDirty: function () { return SETTINGS_DIRTY; },' +
       '  draft: function () { return DRAFT; } };'
     )(!!o.devMode, setToken, confirmFn, google, STATE, !!o.settingsDirty, o.draft || null, showLogin, closeOverlays);
@@ -2228,6 +2531,8 @@ await (async function () {
   check('로그아웃: 메모리 sheetsToken 초기화', h.sheetsToken() === '');
   check('로그아웃: 토큰 세대 증가', h.gen() === 8);
   check('로그아웃: 진행 중 토큰 요청 해제', h.pending().every((p) => p === null));
+  check('로그아웃: ID 토큰 세대 증가', h.idGen() === 4);
+  check('로그아웃: 대기 중인 credential 콜백 해제', h.idCb() === null);
   check('로그아웃: disableAutoSelect 호출', h.env.autoSelectDisabled === 1);
   check('로그아웃: 최근 시트(RECENT_KEY) 보존', h.env.stored.recent === 'SHEET_1');
   check('로그아웃: 로그인 화면 복귀', h.env.login.length === 1 && /로그아웃/.test(h.env.login[0]));
@@ -2366,6 +2671,75 @@ await (async function () {
   // 그리드의 공강 행에서 들어가는 RA 배정 경로는 그대로 살아 있다
   check('그리드 공강 행 → RA 배정 경로 유지', /td\.gfr-all,td\.gfr-some,td\.gfr-partial/.test(html)
     && /openRaAssign\(\+td\.dataset\.day, \+td\.dataset\.period, \+td\.dataset\.grade\)/.test(html));
+})();
+
+/* =========================================================
+   툴바 아이콘 3종 인라인 SVG (index.html 정적 검증)
+   — 문자 글리프는 브라우저·OS마다 모양이 달라 인라인 SVG 로 고정한다.
+     Worker 가 HTML 한 장을 서빙하므로 외부 리소스 참조는 어떤 형태로도 안 된다.
+   ========================================================= */
+(function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+
+  const btn = function (id) {
+    const s = html.indexOf('<button id="' + id + '"');
+    return s < 0 ? '' : html.slice(s, html.indexOf('</button>', s) + 9);
+  };
+  const ids = ['btnRefresh', 'btnUndo', 'btnSettings'];
+  const marks = ids.map(btn);
+
+  // (1) 세 버튼 모두 인라인 SVG — 옛 문자 글리프는 남아 있지 않다
+  check('아이콘 버튼 3종 마크업 존재', marks.every(function (m) { return m.length > 0; }));
+  check('세 아이콘 모두 인라인 <svg>', marks.every(function (m) { return /<svg\b[\s\S]*<\/svg>/.test(m); }));
+  check('옛 문자 글리프 제거(⟳ ↩ ⚙️)', !/&#x27F3;|&#x21A9;|⚙/.test(html));
+  check('아이콘 버튼 안에 텍스트 노드 없음',
+    marks.every(function (m) { return !/>[^<>]*[^\s<>][^<>]*</.test(m.replace(/<svg[\s\S]*<\/svg>/, '<svg/>')); }));
+
+  // (2) 외부 리소스 참조 금지 — <img>·<use href>·url()·아이콘 폰트 전부 없어야 한다
+  check('아이콘에 <img>/<use> 없음', marks.every(function (m) { return !/<img\b|<use\b|<image\b/.test(m); }));
+  check('아이콘에 외부 URL·xlink 참조 없음',
+    marks.every(function (m) { return !/xlink:|https?:\/\/|url\(|src=/.test(m); }));
+  check('툴바에 아이콘 폰트 로드 없음', !/@font-face|fonts\.googleapis|material-icons|font-awesome/i.test(html));
+
+  // (3) 시각적 무게 통일 — 같은 viewBox / stroke-width / 선 끝 처리
+  const svgTag = marks.map(function (m) { return (m.match(/<svg[^>]*>/) || [''])[0]; });
+  check('세 아이콘 viewBox 동일(0 0 24 24)',
+    svgTag.every(function (t) { return /viewBox="0 0 24 24"/.test(t); }));
+  check('세 아이콘 stroke-width 동일(2)', svgTag.every(function (t) { return /stroke-width="2"/.test(t); }));
+  check('세 아이콘 선 끝·모서리 처리 동일(round)',
+    svgTag.every(function (t) { return /stroke-linecap="round"/.test(t) && /stroke-linejoin="round"/.test(t); }));
+
+  // (4) 색은 CSS 가 제어 — fill 은 비우고 stroke 는 currentColor
+  check('세 아이콘 fill="none"', svgTag.every(function (t) { return /fill="none"/.test(t); }));
+  check('세 아이콘 stroke="currentColor"', svgTag.every(function (t) { return /stroke="currentColor"/.test(t); }));
+  check('아이콘 내부에 하드코딩된 색 없음',
+    marks.every(function (m) { return !/(fill|stroke)="#|(fill|stroke)="rgb/.test(m); }));
+  // 기존 색 규칙(특히 되돌리기 비활성 회색)이 그대로 살아 있어야 한다
+  check('되돌리기 비활성 회색 규칙 유지', /#btnUndo:disabled \{ color: #b9b9b9; \}/.test(html));
+  check('새로고침·되돌리기 색 규칙 유지',
+    /#btnRefresh \{ color: #2b6cb0; \}/.test(html) && /#btnUndo \{ color: #c05621; \}/.test(html));
+
+  // (5) 접근성 — svg 는 감추고, 이름은 버튼의 title 이 담당한다
+  check('세 아이콘 aria-hidden="true"', svgTag.every(function (t) { return /aria-hidden="true"/.test(t); }));
+  check('아이콘 버튼 title(툴팁) 유지',
+    /id="btnRefresh"[^>]*title="새로고침 — 시트 최신 상태 다시 불러오기"/.test(html)
+    && /id="btnUndo"[^>]*title="되돌리기 \(Ctrl\+Z\)"/.test(html)
+    && /id="btnSettings"[^>]*title="설정"/.test(html));
+
+  // (6) 버튼 크기·정렬 — 다른 툴바 버튼과 세로 중앙 정렬되도록 flex 중앙 정렬
+  check('tb-icon 이 정사각(32px) 유지', /#toolbar button\.tb-icon \{[^}]*width: 32px;/.test(html));
+  check('tb-icon 이 아이콘을 중앙 정렬', /#toolbar button\.tb-icon \{[^}]*display: inline-flex;[^}]*align-items: center;[^}]*justify-content: center;/.test(html));
+  check('tb-icon svg 크기 지정(18px)', /#toolbar button\.tb-icon svg \{[^}]*width: 18px; height: 18px;/.test(html));
+
+  // (7) 모양 — 톱니바퀴는 톱니 8개 + 가운데 뚫린 원
+  const gear = btn('btnSettings');
+  check('톱니바퀴 톱니 8개', (gear.match(/A8\.5 8\.5 0 0 1/g) || []).length === 8);
+  check('톱니바퀴 가운데 원이 뚫려 있음(stroke 원)', /<circle cx="12" cy="12" r="[\d.]+"\/>/.test(gear));
+  // 새로고침은 끊긴 원호(large-arc) + 화살촉, 되돌리기는 곡선 + 화살촉 — 각 2개 path
+  check('새로고침이 끊긴 원호 + 화살촉', (btn('btnRefresh').match(/<path /g) || []).length === 2
+    && /A8 8 0 1 1 /.test(btn('btnRefresh')));
+  check('되돌리기가 곡선 + 화살촉', (btn('btnUndo').match(/<path /g) || []).length === 2
+    && /d="M19\.5 19C/.test(btn('btnUndo')));
 })();
 
 /* =========================================================
@@ -2572,7 +2946,8 @@ await (async function () {
                ['10', '국어', '김', 'Kor10A', '월1', 'G1']],
       depts: [['교사명', '교과', '주임여부', '', '배치순서'], ['교사0', '국어', '주임', '', '국어']],
       writes: [],
-      failConfigRead: 0        // >0 이면 설정 A:C 조회를 그 횟수만큼 실패시킨다
+      failConfigRead: 0,       // >0 이면 설정 A:C 조회를 그 횟수만큼 실패시킨다
+      failRanges: null         // RegExp — 매칭되는 range 가 든 batchGet 은 503
     }, extra || {});
   }
 
@@ -2592,6 +2967,10 @@ await (async function () {
         if (ranges.some(function (r) { return /^'?설정'?!/.test(r); }) && store.failConfigRead > 0) {
           store.failConfigRead--;
           log.push({ kind: 'batchGet:설정(실패)', ranges: ranges });
+          return new Response('{"error":{"code":503}}', { status: 503 });
+        }
+        if (store.failRanges && ranges.some(function (r) { return store.failRanges.test(r); })) {
+          log.push({ kind: 'batchGet(실패)', ranges: ranges });
           return new Response('{"error":{"code":503}}', { status: 503 });
         }
         body = {
@@ -2803,6 +3182,110 @@ await (async function () {
     check('DEV 저장 응답 config == 이후 state config',
       JSON.stringify(b.config) === JSON.stringify(st2.config));
     resetMockStore();
+  }
+
+  /* =========================================================
+     (9) 조회 경로 왕복 횟수 — 초기 로딩·탭 전환 지연 회귀 방지
+         개선 전: /api/state 6회(탭 지정)·7회(미지정), /api/sheets 4회
+     ========================================================= */
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function (log) {
+      const st = await (await call('/api/state?tab=revised')).json();
+      return { n: log.length, st: st, kinds: log.map(function (l) { return l.kind; }) };
+    });
+    check('/api/state(탭 지정) Sheets 왕복 ≤ 2회 (개선 전 6): ' + r.out.kinds.join(' → '), r.out.n <= 2);
+    check('/api/state 왕복 감소 후에도 그리드 정상', (r.out.st.grid || []).length > 0 && r.out.st.dataStart > 0);
+    check('/api/state 왕복 감소 후에도 config/configVersion 정상',
+      !!r.out.st.config && r.out.st.configVersion != null && r.out.st.config.missing === false);
+    check('/api/state 왕복 감소 후에도 depts(교과별교사) 정상', r.out.st.depts !== null);
+    check('/api/state 왕복 감소 후에도 linkedPinned/warnings 정상',
+      r.out.st.linkedPinned !== undefined && Array.isArray(r.out.st.warnings));
+  }
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function (log) {
+      const st = await (await call('/api/state')).json();
+      return { n: log.length, tab: st.tab, kinds: log.map(function (l) { return l.kind; }) };
+    });
+    check('/api/state(탭 미지정) Sheets 왕복 ≤ 3회 (개선 전 7): ' + r.out.kinds.join(' → '), r.out.n <= 3);
+    check('/api/state(탭 미지정) 이 시간표 탭을 고른다', r.out.tab === 'revised');
+  }
+  {
+    const store = makeStore();
+    const r = await withStore(store, async function (log) {
+      const sh = await (await call('/api/sheets')).json();
+      return { n: log.length, sh: sh, kinds: log.map(function (l) { return l.kind; }) };
+    });
+    check('/api/sheets Sheets 왕복 ≤ 2회 (개선 전 4): ' + r.out.kinds.join(' → '), r.out.n <= 2);
+    check('/api/sheets 가 시간표 탭을 식별', r.out.sh.tabs.some(function (t) { return t.title === 'revised' && t.isTimetable; }));
+    check('/api/sheets 가 electives(연결그룹)를 실어 보낸다', Object.keys(r.out.sh.electives || {}).length > 0);
+    check('/api/sheets configVersion 정상', r.out.sh.configVersion != null);
+  }
+
+  /* (9b) 클라이언트: 첫 /api/state 에 탭을 실어 서버의 헤더 재탐색 왕복을 없앤다 */
+  {
+    const html3 = readFileSync(P('src/index.html'), 'utf8');
+    const bs = fnSrc(html3, 'bootstrap');
+    check('bootstrap 이 첫 loadState 에 탭을 지정(왕복 1회 절약)', /loadState\(STATE\.sheetId, firstTimetableTab\(\)\)/.test(bs));
+    const ft = fnSrc(html3, 'firstTimetableTab');
+    check('firstTimetableTab 이 서버와 같은 규칙(첫 isTimetable 탭 → 첫 탭)',
+      /isTimetable/.test(ft) && /tabs\.length \? tabs\[0\]\.title : null/.test(ft));
+    // 서버 자동 선택과 결과가 같아야 왕복만 줄고 동작은 안 바뀐다
+    const store = makeStore();
+    const r = await withStore(store, async function () {
+      const auto = await (await call('/api/state')).json();
+      const explicit = await (await call('/api/state?tab=revised')).json();
+      return { auto: auto.tab, explicit: explicit.tab };
+    });
+    check('클라이언트가 고른 탭 == 서버 자동 선택 탭', r.out.auto === r.out.explicit);
+  }
+
+  /* (10) 합쳐 읽기의 전부-실패 위험 — 없는 탭은 range 에 넣지 않아 실패가 원천 제거된다 */
+  {
+    const store = makeStore({ tabs: ['revised'] });   // 설정·연결그룹·교과별교사 전부 없음
+    const r = await withStore(store, async function (log) {
+      const st = await (await call('/api/state?tab=revised')).json();
+      const sh = await (await call('/api/sheets')).json();
+      return { st: st, sh: sh, ranges: log.filter(function (l) { return l.ranges; }) };
+    });
+    check('부가 탭이 하나도 없는 시트에서도 /api/state 정상', r.out.st.ok === true && (r.out.st.grid || []).length > 0);
+    check('없는 탭은 아예 조회 range 에 넣지 않는다(탭 없음發 실패 원천 제거)',
+      !r.log.some(function (l) { return /연결그룹|교과별교사|설정|선택과목코드/.test(String(l.url || '')); }));
+    check('설정 탭 부재는 "조회 실패"가 아니다 → configVersion 유지(저장 가능)',
+      r.out.st.configVersion != null && r.out.st.config.missing === true);
+    check('연결그룹·교과별교사 부재 시 빈 값으로 흡수', r.out.st.depts === null && eq(r.out.st.linkedPinned, {}));
+    check('부가 탭 부재에서도 /api/sheets 정상', r.out.sh.ok === true && r.out.sh.tabs.length === 1);
+  }
+
+  /* (11) 부가 조회가 실패해도 앱은 죽지 않는다(batchGet 전부-실패 → 개별 폴백) */
+  {
+    const store = makeStore({ failRanges: /연결그룹|교과별교사/ });
+    const r = await withStore(store, async function () {
+      const res = await call('/api/state?tab=revised');
+      return { status: res.status, st: await res.json() };
+    });
+    check('연결그룹·교과별교사 조회 실패해도 /api/state 는 200', r.out.status === 200 && r.out.st.ok === true);
+    check('실패해도 그리드는 온전히 내려온다(합쳐 읽기가 그리드를 삼키지 않는다)',
+      (r.out.st.grid || []).length > 0 && r.out.st.dataStart > 0);
+    check('실패한 부가 조회는 빈 값으로 흡수', r.out.st.depts === null && eq(r.out.st.linkedPinned, {}));
+    check('부가 조회 실패가 설정을 오염시키지 않는다(configVersion 유효 → 저장 가능)',
+      r.out.st.configVersion != null && r.out.st.config.missing === false);
+  }
+
+  /* (12) 설정 조회만 실패 — 합쳐 읽어도 "탭 없음"으로 위장하지 않고, 저장은 거부된다 */
+  {
+    const store = makeStore({ failRanges: /설정/ });
+    const r = await withStore(store, async function () {
+      const st = await (await call('/api/state?tab=revised')).json();
+      const res = await postCfg(st.config, st.configVersion);
+      return { st: st, status: res.status, body: await res.json() };
+    });
+    check('설정 조회 실패 시 /api/state 는 그리드를 계속 내려준다', (r.out.st.grid || []).length > 0);
+    check('설정 조회 실패 시 configVersion=null (빈 해시 위장 없음)', r.out.st.configVersion === null);
+    check('설정 조회 실패 상태에서 저장은 503 config_unavailable 로 거부',
+      r.out.status === 503 && r.out.body.error === 'config_unavailable');
+    check('config_unavailable 시 시트에 쓰기 없음', store.writes.length === 0);
   }
 })();
 

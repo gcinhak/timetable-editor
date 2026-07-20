@@ -18,13 +18,13 @@ import WebExtraSrc from './core/web_extra.js';
 import { verifyIdToken } from './lib/google-auth.js';
 import {
   hashGrid, hashValues, lastDataRow, cellsToBatchData, getSheets, batchGetValues, batchUpdateValues,
-  appendRows, addSheet, duplicateSheet, detectHeaderRow, detectLayout, normalizeGrid, colLetter,
-  nextCopyName, overwriteSheetRange, parseLinkedGroups, deriveClasslessFromGrades,
-  makeSheetsFetch, mapSheetsError, resolveSheetId
+  appendRows, addSheet, duplicateSheet, detectHeaderRow, detectLayout, normalizeGrid,
+  nextStageNames, parseStageTab, overwriteSheetRange, parseLinkedGroups, deriveClasslessFromGrades,
+  makeSheetsFetch, mapSheetsError, resolveSheetId, batchGetPartial, gridRange
 } from './lib/sheets.js';
 import {
   nonTeacherRows, incompleteUnits, historyKindLabel, parseDepts, raOpError,
-  readConfigWithVersion as readConfigWithVersionImpl, resolveApplyTab
+  readConfigWithVersion as readConfigWithVersionImpl, configFromRaw, resolveApplyTab
 } from './lib/state.js';
 import { getMockStore, mockPickTab, applyCellsToGrid, mockListTabs, mockDuplicateTab, mockSaveConfig } from './dev/mock_store.js';
 
@@ -129,14 +129,18 @@ function pad42(grid) {
    시간표 탭 읽기: 헤더 범위로 레이아웃(headerRow/slotStartCol) 탐지 후
    실제 슬롯 열 범위를 읽어 표준 42열 그리드로 정규화. 시간표 아니면 null.
    ========================================================= */
-async function readTimetable(sf, tab) {
-  var head = (await batchGetValues(sf, ["'" + tab + "'!A1:M10"]))[0] || [];
-  var layout = detectLayout(head);
+// raw 는 gridRange(tab) 로 넉넉히 읽어 둔 원본. detectLayout 은 상위 10행×12열만 보므로
+// 별도 헤더 조회 없이 같은 원본에서 레이아웃을 판정한다(왕복 1회 절약).
+function buildTimetable(raw) {
+  var layout = detectLayout(raw || []);
   if (!layout) return null;
-  var endCol = colLetter(layout.slotStartCol + 39);
-  var raw = (await batchGetValues(sf, ["'" + tab + "'!A:" + endCol]))[0] || [];
-  var grid = normalizeGrid(raw, layout);
+  var grid = normalizeGrid(raw || [], layout);
   return { grid: grid, layout: layout, dataStart: layout.headerRow + 1 };
+}
+
+async function readTimetable(sf, tab) {
+  var raw = (await batchGetValues(sf, [gridRange(tab)]))[0] || [];
+  return buildTimetable(raw);
 }
 
 /* =========================================================
@@ -166,16 +170,71 @@ async function pickTimetableTab(sf, sheetsList, tabParam) {
   return sheetsList.length ? sheetsList[0].title : TAB_REVISED;
 }
 
-// 설정 탭 원본값(A:C)을 읽어 { config, version, raw, unavailable } 반환.
-// 탭 부재 → 빈 config + version=hashValues([]).
-// 조회 실패 → unavailable:true, version:null (빈 해시로 위장하지 않는다).
-function readConfigWithVersion(sf, sheetsList) {
-  return readConfigWithVersionImpl({
+function configDeps(sf) {
+  return {
     batchGet: function (ranges) { return batchGetValues(sf, ranges); },
     parseConfig: CORE.parseConfig,
     hashValues: hashValues,
     onError: function (e) { logError('readConfigWithVersion', e); }
-  }, sheetsList, TAB_CONFIG);
+  };
+}
+
+// 설정 탭 원본값(A:C)을 읽어 { config, version, raw, unavailable } 반환.
+// 탭 부재 → 빈 config + version=hashValues([]).
+// 조회 실패 → unavailable:true, version:null (빈 해시로 위장하지 않는다).
+function readConfigWithVersion(sf, sheetsList) {
+  return readConfigWithVersionImpl(configDeps(sf), sheetsList, TAB_CONFIG);
+}
+
+/* ---------------------------------------------------------
+   부수 조회(설정·연결그룹·교과별교사·선택과목코드) 합쳐 읽기.
+
+   batchGet 은 전부-성공/전부-실패다. 그래서 두 겹으로 막는다.
+   (1) 존재 확인: getSheets 결과에 없는 탭은 아예 range 에 넣지 않는다
+       → "탭 없음"으로 인한 실패가 원천 제거된다(이게 기존 실패의 대부분이었다).
+   (2) 부분 폴백: 그래도 실패하면 batchGetPartial 이 개별 조회로 한 번 되돌아가
+       실패한 범위만 error 로 표시한다 → 한 범위의 실패가 나머지를 삼키지 않는다.
+   설정은 여전히 "탭 없음"(저장 가능)과 "조회 실패"(unavailable, 저장 거부)를 구분한다.
+   --------------------------------------------------------- */
+function sideRangeSpec(sheetsList, opts) {
+  const has = function (t) { return sheetsList.some(function (s) { return s.title === t; }); };
+  const spec = [];
+  spec.push({ key: 'config', exists: has(TAB_CONFIG), range: "'" + TAB_CONFIG + "'!A:C" });
+  if (opts.linked) spec.push({ key: 'linked', exists: has(TAB_LINKED), range: "'" + TAB_LINKED + "'!A:F" });
+  if (opts.depts) spec.push({ key: 'depts', exists: has(TAB_DEPTS), range: "'" + TAB_DEPTS + "'!A:E" });
+  // 선택과목코드는 연결그룹이 없을 때만 대체로 쓰인다(연결그룹 우선).
+  if (opts.electives && !has(TAB_LINKED)) {
+    spec.push({ key: 'electives', exists: has(TAB_ELECTIVES), range: "'" + TAB_ELECTIVES + "'!A:C" });
+  }
+  return spec.filter(function (s) { return s.exists; });
+}
+
+// spec 항목들의 결과를 { key: {values|null} } 로 정리. lead 는 spec 앞에 붙일 범위들.
+async function readSide(sf, leadRanges, spec) {
+  const res = await batchGetPartial(sf, (leadRanges || []).concat(spec.map(function (s) { return s.range; })));
+  const lead = res.slice(0, (leadRanges || []).length);
+  const side = {};
+  spec.forEach(function (s, i) {
+    const r = res[(leadRanges || []).length + i];
+    if (r.error) logError('side:' + s.key, r.error);
+    side[s.key] = r.error ? null : (r.values || []);
+  });
+  return { lead: lead, side: side };
+}
+
+// side.config(값 | null | undefined=탭없음) → readConfigWithVersion 과 동일한 결과.
+function configFromSide(sheetsList, side) {
+  const exists = sheetsList.some(function (s) { return s.title === TAB_CONFIG; });
+  return configFromRaw(configDeps(null), exists, exists ? side.config : null);
+}
+
+// side.linked → readLinkedPinned 와 동일한 결과(탭 없음·조회 실패 모두 빈 값).
+function linkedFromSide(side) {
+  if (side.linked == null) return { pinned: {}, warnings: [], grades: {} };
+  try {
+    const p = parseLinkedGroups(side.linked);
+    return { pinned: p.pinned || {}, warnings: p.warnings || [], grades: p.grades || {} };
+  } catch (e) { logError('readLinkedPinned', e); return { pinned: {}, warnings: [], grades: {} }; }
 }
 
 // 연결그룹 탭에서 pinned(고정수업시간) + 인식불가 라벨 경고를 읽는다. 탭 없거나 오류면 빈 값.
@@ -207,52 +266,51 @@ async function handleSheets(sf, sheetId) {
   } catch (e) {
     return handleApiError(e);
   }
-  var ranges = sheetsList.map(function (s) { return "'" + s.title + "'!A1:M10"; });
-  var head = ranges.length ? await batchGetValues(sf, ranges) : [];
+  // 헤더 탐지 + 선택과목 + 설정을 1회의 batchGet 으로 합쳐 읽는다(4회 → 2회).
+  var headRanges = sheetsList.map(function (s) { return "'" + s.title + "'!A1:M10"; });
+  var spec = sideRangeSpec(sheetsList, { linked: true, electives: true });
+  var got = await readSide(sf, headRanges, spec);
   var tabs = sheetsList.map(function (s, i) {
-    var lay = detectLayout(head[i] || []);
+    var lay = (got.lead[i] && !got.lead[i].error) ? detectLayout(got.lead[i].values || []) : null;
     return {
       title: s.title, sheetId: s.sheetId, isTimetable: lay !== null,
       headerRow: lay ? lay.headerRow : null, dataStart: lay ? lay.headerRow + 1 : null
     };
   });
   var electives = {};
-  if (sheetsList.some(function (s) { return s.title === TAB_LINKED; })) {
-    try {
-      var lv = await batchGetValues(sf, ["'" + TAB_LINKED + "'!A:F"]);
-      electives = parseLinkedGroups(lv[0] || []).groups;
-    } catch (e) { logError('electives(연결그룹)', e); electives = {}; }
-  } else if (sheetsList.some(function (s) { return s.title === TAB_ELECTIVES; })) {
-    try {
-      var ev = await batchGetValues(sf, ["'" + TAB_ELECTIVES + "'!A:C"]);
-      electives = parseElectives(ev[0] || []);
-    } catch (e) { logError('electives(선택과목코드)', e); electives = {}; }
-  }
-  var cv = await readConfigWithVersion(sf, sheetsList);
+  try {
+    if (got.side.linked != null) electives = parseLinkedGroups(got.side.linked).groups;
+    else if (got.side.electives != null) electives = parseElectives(got.side.electives);
+  } catch (e) { logError('electives', e); electives = {}; }
+  var cv = configFromSide(sheetsList, got.side);
   return json({ ok: true, sheetId: sheetId, tabs: tabs, electives: electives, configVersion: cv.version });
 }
 
 async function handleState(sf, sheetId, tabParam, payload) {
   const sheetsList = await getSheets(sf);
-  const tab = await pickTimetableTab(sf, sheetsList, tabParam);
-  const tt = await readTimetable(sf, tab);
+  // 탭이 이미 정해졌다면 그리드까지 한 번에 읽는다(getSheets + batchGet 1회 = 왕복 2회).
+  // 정해지지 않았을 때만 헤더 탐색 왕복이 한 번 더 붙는다.
+  let tab = (tabParam && sheetsList.some(function (s) { return s.title === tabParam; })) ? tabParam : null;
+  if (!tab) tab = await pickTimetableTab(sf, sheetsList, null);
+  const spec = sideRangeSpec(sheetsList, { linked: true, depts: true });
+  const got = await readSide(sf, [gridRange(tab)], spec);
+  if (got.lead[0].error) throw got.lead[0].error;   // 그리드 조회 실패는 종전대로 요청 전체 실패
+  const tt = buildTimetable(got.lead[0].values || []);
   if (tt === null) {
     return json({ ok: false, error: 'not_timetable', reasons: ['시간표 형식 탭이 아닙니다.'] }, 400);
   }
   const grid = tt.grid;
   const dataStart = tt.dataStart;
   const dataEnd = lastDataRow(grid);
-  const cv = await readConfigWithVersion(sf, sheetsList);
-  const lp = await readLinkedPinned(sf, sheetsList);
+  const cv = configFromSide(sheetsList, got.side);
+  const lp = linkedFromSide(got.side);
   CORE.resolvePinned(cv.config, lp.pinned);
   deriveClasslessFromGrades(cv.config, lp.grades);
   const version = hashGrid(grid, dataStart, dataEnd);
   let depts = null;
-  if (sheetsList.some(function (s) { return s.title === TAB_DEPTS; })) {
-    try {
-      const dv = await batchGetValues(sf, ["'" + TAB_DEPTS + "'!A:E"]);
-      depts = parseDepts(dv[0] || []);
-    } catch (e) { logError('parseDepts', e); depts = null; }
+  if (got.side.depts != null) {
+    try { depts = parseDepts(got.side.depts); }
+    catch (e) { logError('parseDepts', e); depts = null; }
   }
   return json({
     ok: true, sheetId: sheetId, tab: tab, grid: grid, dataStart: dataStart,
@@ -404,9 +462,20 @@ async function handleDuplicateTab(sf, sheetId, body) {
   const sheetsList = await getSheets(sf);
   const src = sheetsList.find(function (s) { return s.title === body.tab; });
   if (!src) return json({ ok: false, error: 'no_tab', reasons: ['탭을 찾을 수 없습니다: ' + body.tab] }, 400);
-  const newName = nextCopyName(sheetsList.map(function (s) { return s.title; }), body.tab);
-  await duplicateSheet(sf, src.sheetId, newName, src.index + 1);
-  return json({ ok: true, sheetId: sheetId, tab: newName });
+  const plan = nextStageNames(sheetsList.map(function (s) { return s.title; }));
+  const renames = plan.renames.map(function (r) {
+    const t = sheetsList.find(function (s) { return s.title === r.from; });
+    return { sheetId: t.sheetId, to: r.to };
+  });
+  // 새 차수 탭은 기존 최대 차수 탭 바로 뒤에 둔다(차수 탭이 없으면 원본 뒤).
+  let anchor = src, maxN = -1;
+  sheetsList.forEach(function (s) {
+    const p = parseStageTab(s.title);
+    if (p && p.n > maxN) { maxN = p.n; anchor = s; }
+  });
+  // 복제와 '(최종)' 이동은 한 번의 batchUpdate 로 나간다 → 부분 성공 없음.
+  await duplicateSheet(sf, src.sheetId, plan.newName, anchor.index + 1, renames);
+  return json({ ok: true, sheetId: sheetId, tab: plan.newName });
 }
 
 async function handleConfig(sf, sheetId, body) {

@@ -1,5 +1,5 @@
 import { grid as MOCK_GRID, grid1 as MOCK_GRID1, grid2 as MOCK_GRID2, configValues as MOCK_CONFIG, electives as MOCK_ELECTIVES, depts as MOCK_DEPTS, pinned as MOCK_PINNED, linkedWarnings as MOCK_LINKED_WARNINGS, grades as MOCK_GRADES } from './mock_data.js';
-import { nextCopyName } from '../lib/sheets.js';
+import { nextStageNames } from '../lib/sheets.js';
 const clone2d = (a) => a.map((r) => r.slice());
 export function getMockStore() {
   if (!globalThis.__TT_MOCK__) {
@@ -35,11 +35,18 @@ export function applyCellsToGrid(grid, cells) { (cells||[]).forEach((c) => { gri
 export function mockListTabs(store) {
   return Object.keys(store.sheets).map((title) => ({ title, isTimetable: true, headerRow: 2, dataStart: 3 }));
 }
-// 탭 복제: nextCopyName 으로 사본명 결정 후 딥카피. 새 이름 반환.
+// 탭 복제: nextStageNames 로 새 차수명·'(최종)' 이동을 정하고 딥카피. 새 이름 반환.
+// 프로덕션과 같이 이름 변경과 생성이 함께 반영된다(탭 순서 유지).
 export function mockDuplicateTab(store, tab) {
-  const name = nextCopyName(Object.keys(store.sheets), tab);
-  store.sheets[name] = clone2d(store.sheets[tab]);
-  return name;
+  const plan = nextStageNames(Object.keys(store.sheets));
+  const renamed = {};
+  Object.keys(store.sheets).forEach((t) => {
+    const r = plan.renames.find((x) => x.from === t);
+    renamed[r ? r.to : t] = store.sheets[t];
+  });
+  renamed[plan.newName] = clone2d(store.sheets[tab]);
+  store.sheets = renamed;
+  return plan.newName;
 }
 // 설정 저장: serializeConfig 결과 2D 를 그대로 보관.
 export function mockSaveConfig(store, values2d) { store.config = values2d; return store.config; }

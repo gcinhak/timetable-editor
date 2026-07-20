@@ -25,23 +25,34 @@ export async function readConfigSafe(batchGet, configRange, parseConfig) {
 // deps: { batchGet, parseConfig, hashValues, onError? }
 export async function readConfigWithVersion(deps, sheetsList, configTab) {
   const exists = !sheetsList || sheetsList.some(function (s) { return s.title === configTab; });
+  if (!exists) return configFromRaw(deps, false, null);
+  try {
+    const vals = await deps.batchGet(["'" + configTab + "'!A:C"]);
+    return configFromRaw(deps, true, (vals && vals[0]) || []);
+  } catch (e) {
+    if (deps.onError) deps.onError(e);
+    return configFromRaw(deps, true, null);
+  }
+}
+
+// 이미 읽어 둔 설정 탭 원본값으로 위와 동일한 결과를 만든다(합쳐 읽기 경로용).
+// exists=false → 탭 부재: 빈 config + version=hashValues([]) (정상적으로 새 설정 저장 가능).
+// exists=true 이고 raw==null → 조회 실패: unavailable:true + version:null.
+//   합쳐 읽더라도 "탭 없음"과 "조회 실패"의 구분은 절대 흐려지지 않는다.
+export function configFromRaw(deps, exists, raw) {
   if (!exists) {
     const empty = deps.parseConfig([]);
     empty.missing = true;
     return { config: empty, version: deps.hashValues([]), raw: [], unavailable: false };
   }
-  try {
-    const vals = await deps.batchGet(["'" + configTab + "'!A:C"]);
-    const raw = (vals && vals[0]) || [];
-    const config = deps.parseConfig(raw);
-    config.missing = false;
-    return { config: config, version: deps.hashValues(raw), raw: raw, unavailable: false };
-  } catch (e) {
-    if (deps.onError) deps.onError(e);
+  if (raw == null) {
     const config = deps.parseConfig([]);
     config.missing = true;
     return { config: config, version: null, raw: null, unavailable: true };
   }
+  const config = deps.parseConfig(raw);
+  config.missing = false;
+  return { config: config, version: deps.hashValues(raw), raw: raw, unavailable: false };
 }
 
 // apply(쓰기) 경로의 대상 탭 결정. 조회 경로와 달리 폴백하지 않는다.
@@ -103,8 +114,45 @@ export function historyKindLabel(kind, moves) {
   return '이동';
 }
 
-export var RA_VALUE_RE = /^RA(?:(7|8|9|10|11|12)([A-C])?)?$/;
+export var RA_VALUE_RE = /^RA(?:(\d{2,})_(7|8|9|10|11|12)([A-C])?|(7|8|9|10|11|12)([A-C])?)?$/;
 export function isRaValue(v) { return RA_VALUE_RE.test(String(v == null ? '' : v).trim()); }
+
+// RA 값 파싱(순수). RA 값이 아니면 null.
+// 반환 { seq: number|null, grade: number|null, cls: string|null, target: string }
+//  target: 반 지정이면 '11A', 학년 단위면 '12', 순수 'RA'(legacy)면 ''.
+//  seq 는 신형식(RA01_11A)만 값이 있고 legacy(RA/RA12/RA12B)는 null.
+export function parseRaValue(v) {
+  var s = String(v == null ? '' : v).trim();
+  var m = RA_VALUE_RE.exec(s);
+  if (!m) return null;
+  var seq = m[1] != null ? parseInt(m[1], 10) : null;
+  var gs = m[1] != null ? m[2] : m[4];
+  var cs = m[1] != null ? m[3] : m[5];
+  var grade = gs != null ? parseInt(gs, 10) : null;
+  var cls = cs || null;
+  return { seq: seq, grade: grade, cls: cls, target: gs == null ? '' : (gs + (cs || '')) };
+}
+
+// 모델 전체 슬롯을 훑어 다음 배정 순번(기존 최대 순번+1, 없으면 1) 반환(순수).
+export function nextRaSeq(model) {
+  var max = 0;
+  ((model && model.entries) || []).forEach(function (e) {
+    if (!e || !e.slots) return;
+    for (var i = 0; i < e.slots.length; i++) {
+      var p = parseRaValue(e.slots[i]);
+      if (p && p.seq != null && p.seq > max) max = p.seq;
+    }
+  });
+  return max + 1;
+}
+
+// 순번+대상 → 값 문자열(순수). seq<100 이면 2자리 0채움, 100 이상은 그대로.
+export function formatRaValue(seq, target) {
+  var n = Number(seq);
+  var s = String(n);
+  if (n < 100) s = ('0' + s).slice(-2);
+  return 'RA' + s + '_' + String(target);
+}
 
 // 특정 슬롯(idx)에 RA 감독으로 배정 가능한 교사 후보(정렬됨).
 // 조건: type==='teacher' && 슬롯 비어있음 && 불가시간 아님.
@@ -142,8 +190,10 @@ export function assignCandidates(model, config, idx) {
 
 // RA 배정/해제 서버측 재검증(순수). 첫 위반의 {error,status} 반환, 정상이면 null.
 // assigns [{row,idx,value}]: 교사행 && 슬롯 범위(0..39) && 슬롯 비어 있어야 함.
-//   value 미지정/빈값이면 'RA'(하위호환). RA_VALUE_RE(순수 'RA' / 'RA'+학년 / 'RA'+학년+반) 만족해야 함(invalid_value).
-//   반 지정('RA'+학년+반)이면 같은 idx에 동일 값이 이미 있으면 duplicate_ra. 순수 'RA'·'RA'+학년(일부)은 공동 감독 허용→중복 허용.
+//   value 미지정/빈값이면 'RA'(하위호환). RA_VALUE_RE 만족해야 함(invalid_value).
+//   값 형식: 신형식 'RA'+순번(2자리 이상)+'_'+대상('11A' 또는 '12'), legacy 순수 'RA' / 'RA'+학년 / 'RA'+학년+반.
+//   반 지정(대상에 반 포함)이면 같은 idx에 대상(target)이 같은 RA 값이 이미 있으면 duplicate_ra(순번 무관).
+//   순수 'RA'·학년 단위(일부)는 공동 감독 허용→중복 허용.
 // clears  [{row,idx}]: 교사행 && 슬롯 값이 RA 계열(isRaValue) 이어야 함(not_ra).
 export function raOpError(model, assigns, clears) {
   var byRow = {};
@@ -158,11 +208,12 @@ export function raOpError(model, assigns, clears) {
     if (v != null && String(v).trim() !== '') return { error: 'cell_occupied', status: 409 };
     var val = (a[i].value == null || String(a[i].value).trim() === '') ? 'RA' : String(a[i].value).trim();
     if (!RA_VALUE_RE.test(val)) return { error: 'invalid_value', status: 400 };
-    var m = RA_VALUE_RE.exec(val);
-    if (m && m[2]) {
+    var p = parseRaValue(val);
+    if (p && p.cls) {
       for (var k = 0; k < entries.length; k++) {
         var en = entries[k];
-        if (String(en.slots[a[i].idx] == null ? '' : en.slots[a[i].idx]).trim() === val) return { error: 'duplicate_ra', status: 409 };
+        var q = parseRaValue(en.slots[a[i].idx]);
+        if (q && q.target === p.target) return { error: 'duplicate_ra', status: 409 };
       }
     }
   }
@@ -343,13 +394,10 @@ export function gradeFreeState(model, config, G, S) {
     subj = String(subj).trim();
     if (!subj) return;
     if (isRaValue(subj)) {                       // RA 감독 값: busy 집계 안 함(반은 free 유지)
-      if (subj === 'RA') { /* legacy 순수 RA: 아무 반도 커버 안 함 */ }
-      else {
-        var _rm = RA_VALUE_RE.exec(subj);
-        if (_rm && _rm[1] != null && parseInt(_rm[1], 10) === G) {
-          if (_rm[2]) raCov[_rm[1] + _rm[2]] = true;   // RA+학년+반 → 반 단위 커버
-          else raGradeCov = true;                       // RA+학년 → 학년 단위(일부) 커버
-        }
+      var _rp = parseRaValue(subj);
+      if (_rp && _rp.grade === G) {
+        if (_rp.cls) raCov[_rp.grade + _rp.cls] = true;   // 반 단위 커버
+        else raGradeCov = true;                            // 학년 단위(일부) 커버
       }
       return;
     }
