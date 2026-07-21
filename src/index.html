@@ -182,15 +182,19 @@
     transition: max-height .25s ease, opacity .2s ease, margin-top .25s ease;
   }
   #panel.collapsed #panelBody { max-height: 0; opacity: 0; margin-top: 0; }
-  #panelSteps { margin: 0 0 10px; padding-left: 18px; font-size: 13px; }
-  #panelSteps li { margin: 2px 0; }
   #planPaths { margin: 0 0 8px; font-size: 13px; }
   #planPaths .paths-head { margin: 0 0 4px; font-weight: 600; }
   #planPaths label { display: block; margin: 2px 0; cursor: pointer; }
   #planPaths input { margin-right: 6px; }
-  #panel .btns { display: flex; gap: 10px; margin-left: auto; }
+  #panel .btns { display: flex; gap: 10px; margin-left: auto; align-items: center; }
   #panel .btns button { font-size: 13px; padding: 7px 18px; border-radius: 5px; cursor: pointer; border: 1px solid #bbb; }
+  #stagedNote { font-size: 12px; font-weight: 600; color: #b3261e; }
+  #btnChange { background: #2f5fa8; color: #fff; border-color: #2f5fa8; }
+  #btnChange:disabled { background: #aab7ca; border-color: #aab7ca; cursor: default; }
   #btnConfirm { background: #2f5fa8; color: #fff; border-color: #2f5fa8; }
+  #btnConfirm:disabled { background: #aab7ca; border-color: #aab7ca; cursor: default; }
+  #btnConfirm.attn { background: #2e7d32; border-color: #2e7d32; box-shadow: 0 0 0 2px rgba(46,125,50,.25); }
+  #planPaths .staged-item { margin: 2px 0; }
 
   #loading {
     position: fixed; inset: 0; background: rgba(255,255,255,.75);
@@ -485,13 +489,14 @@
     <h3>이동 계획</h3>
     <button id="panelToggle" type="button" aria-label="접기/펼치기" title="접기">⌄</button>
     <div class="btns">
-      <button id="btnConfirm" type="button">확정</button>
+      <span id="stagedNote"></span>
+      <button id="btnChange" type="button" disabled>변경</button>
+      <button id="btnConfirm" type="button" disabled>확정</button>
       <button id="btnCancel" type="button">취소</button>
     </div>
   </div>
   <div id="panelBody">
     <div id="planPaths"></div>
-    <ul id="panelSteps"></ul>
   </div>
 </div>
 
@@ -956,7 +961,8 @@ var STATE = {
   unavailMode: false, unavailDirty: false,
   warnings: [], linkedPinned: {},
   target: null, plan: null, planTo: null, cellMap: null,
-  undoStack: []
+  undoStack: [],
+  staged: [], stagedBase: null   // [변경] 스테이징: 로컬 반영된 이동 목록 + 서버 원본(grid·version) 보존
 };
 var COLORS = { green: 'hl-green', yellow: 'hl-yellow', blue: 'hl-blue', orange: 'hl-orange' };
 var DRAFT = null; // 설정 패널 편집용 사본
@@ -1060,9 +1066,9 @@ function closeOverlays() {
  * 최근 시트(RECENT_KEY)도 지우지 않는다(개인정보가 아니고 다음 사용자도 같은 시트를 쓴다).
  * 테스트가 이 구간을 통째로 추출한다 — DOM 은 showLogin/closeOverlays 에만 위임한다. */
 
-/* 아직 시트에 반영되지 않은 편집이 남아 있는가 */
+/* 아직 시트에 반영되지 않은 편집이 남아 있는가 (스테이징된 [변경] 포함) */
 function hasUnsavedWork() {
-  return !!(STATE.plan || STATE.unavailDirty || SETTINGS_DIRTY);
+  return !!(STATE.plan || (STATE.staged && STATE.staged.length) || STATE.unavailDirty || SETTINGS_DIRTY);
 }
 
 function doLogout() {
@@ -1082,6 +1088,7 @@ function doLogout() {
   // 진행 중이던 작업 상태 정리
   STATE.target = null; STATE.plan = null; STATE.planTo = null; STATE.cellMap = null;
   STATE.undoStack = [];
+  STATE.staged = []; STATE.stagedBase = null;
   STATE.grid = null; STATE.config = null; STATE.model = null; STATE.user = '';
   STATE.unavailMode = false; STATE.unavailDirty = false;
   DRAFT = null;
@@ -1238,6 +1245,7 @@ function onState(data) {
   STATE.user = data.user || '';
   STATE.model = buildModel(STATE.grid.slice(STATE.dataStart - 1), STATE.dataStart);
   STATE.target = null; STATE.plan = null; STATE.planTo = null;
+  STATE.staged = []; STATE.stagedBase = null;   // 서버 최신 상태가 기준 — 스테이징 초기화
 
   document.getElementById('userInfo').textContent = STATE.user;
   setTabSelection();
@@ -1294,6 +1302,7 @@ function openSheet() {
   if (DEV_MODE) return;
   var id = parseSheetId(document.getElementById('sheetInput').value);
   if (!id) { alert('구글시트 URL 또는 ID를 입력하세요.'); return; }
+  if (!confirmDiscardStaged('다른 시트를 열까요?')) return;
   STATE.sheetId = id;
   STATE.tab = null;
   clearUndoStack();
@@ -1306,6 +1315,7 @@ function openSheet() {
 
 function duplicateTab() {
   if (!STATE.tab) return;
+  if (!confirmDiscardStaged('탭을 복제할까요? (미확정 변경은 복제본에 포함되지 않습니다)')) return;
   clearUndoStack();
   show('loading', true, 'flex');
   apiCall('/api/duplicate-tab', {
@@ -1523,9 +1533,10 @@ function clearHighlights() {
 function clearSelection() {
   clearHighlights();
   STATE.target = null; STATE.plan = null; STATE.plans = null; STATE.planTo = null;
-  show('panel', false);
+  show('panel', hasStaged());   // 스테이징 중에는 패널을 유지한다([확정]/[취소] 접근)
   setPanelCollapsed(false); // 숨겨진 뒤 다음에 나타날 때 펼친 상태로 시작
   setGroupHint('');
+  updateStagingUi();
 }
 
 function onCellClick(ev) {
@@ -1534,6 +1545,7 @@ function onCellClick(ev) {
   // RA 감독 셀은 이동 시작이 아니라 해제 확인 — 다른 모든 로직보다 먼저 가로챈다
   var raEntry = STATE.model.entries.find(function (e) { return e.row === erow; });
   if (raEntry && isRaValue(raEntry.slots[idx])) {
+    if (hasStaged()) { toast('미확정 변경이 있습니다 — 먼저 [확정] 또는 [취소]하세요'); return; }
     if (window.confirm('RA 감독 배정을 해제할까요?')) raClearCell(erow, idx);
     return;
   }
@@ -1580,6 +1592,8 @@ function toggleUnavail(erow, idx) {
 function toggleUnavailMode() {
   var btn = document.getElementById('btnUnavailMode');
   if (STATE.unavailMode) { exitUnavailMode(); return; }
+  // 불가 시간 저장(설정 저장)은 스테이징과 충돌한다 — 스테이징 중에는 진입 자체를 막는다.
+  if (hasStaged()) { toast('미확정 변경이 있습니다 — 먼저 [확정] 또는 [취소]하세요'); return; }
   STATE.unavailMode = true;
   STATE.unavailDirty = false;
   btn.classList.add('active');
@@ -1643,27 +1657,24 @@ function selectPlan(toIdx) {
   if (!plans || !plans.length) return;
   STATE.plans = plans; STATE.planTo = toIdx;
 
-  // 경로 선택 UI (2개 이상일 때만)
+  // 경로 선택 UI — 경로 요약 줄이 이동 내용의 유일한 표시(별도 단계 목록 없음).
+  // 경로가 1개뿐이어도 같은 형식("이동 방법 1가지" + "경로 1 …")으로 보여준다.
   var pathsEl = document.getElementById('planPaths');
-  if (plans.length >= 2) {
-    var html = '<div class="paths-head">이동 방법 ' + plans.length + '가지</div>';
-    plans.forEach(function (p, i) {
-      var label = '경로 ' + (i + 1) + ' (' + p.moves.length + '건): ' + planMoveSegs(p).join(' · ');
-      html += '<label><input type="radio" name="planPath" value="' + i + '"' +
-        (i === 0 ? ' checked' : '') + '>' + label + '</label>';
-    });
-    pathsEl.innerHTML = html;
-    Array.prototype.forEach.call(pathsEl.querySelectorAll('input[name="planPath"]'), function (r) {
-      r.addEventListener('change', function () { renderSelectedPlan(+this.value); });
-    });
-  } else {
-    pathsEl.innerHTML = '';
-  }
+  var html = '<div class="paths-head">이동 방법 ' + plans.length + '가지</div>';
+  plans.forEach(function (p, i) {
+    var label = '경로 ' + (i + 1) + ' (' + p.moves.length + '건): ' + planMoveSegs(p).join(' · ');
+    html += '<label><input type="radio" name="planPath" value="' + i + '"' +
+      (i === 0 ? ' checked' : '') + '>' + label + '</label>';
+  });
+  pathsEl.innerHTML = html;
+  Array.prototype.forEach.call(pathsEl.querySelectorAll('input[name="planPath"]'), function (r) {
+    r.addEventListener('change', function () { renderSelectedPlan(+this.value); });
+  });
 
   renderSelectedPlan(0); // 기본 선택 = 첫 경로(최소 이동)
 }
 
-// 선택된 경로 i 를 프리뷰(주황 페인트 + 단계 목록 + 그룹 안내)로 렌더.
+// 선택된 경로 i 를 프리뷰(주황 페인트 + 그룹 안내)로 렌더.
 function renderSelectedPlan(i) {
   var plan = STATE.plans[i];
   STATE.plan = plan;
@@ -1680,19 +1691,27 @@ function renderSelectedPlan(i) {
   var grp = groupOf(STATE.config, tSubj);
   setGroupHint(grp ? ('그룹 ' + grp.name + ': ' + plan.moves.length + '개 행 함께 이동') : '');
 
-  document.getElementById('panelSteps').innerHTML =
-    planMoveSegs(plan).map(function (s) { return '<li>' + s + '</li>'; }).join('');
-
   // 라디오 상태 동기화
   var radio = document.querySelector('#planPaths input[name="planPath"][value="' + i + '"]');
   if (radio) radio.checked = true;
 
   setPanelCollapsed(false); // 새 계획 선택 시 항상 펼친 상태로
   show('panel', true);
+  updateStagingUi();   // [변경] 버튼 활성화 동기화
 }
 
 /* =========================================================
-   확정 (POST /api/apply)
+   변경(로컬 스테이징) → 확정(서버 저장) 2단계 흐름
+   ---------------------------------------------------------
+   [변경]  선택한 경로를 화면 그리드에만 반영하고 STATE.staged 에 쌓는다.
+           서버 원본은 STATE.stagedBase(grid·version)에 보존된다.
+           반영된 그리드·모델 기준으로 다음 이동을 계속 계획할 수 있다.
+   [확정]  쌓인 변경을 순서대로 /api/apply 에 한 건씩 재생(replay)한다.
+           변경 N은 변경 N-1 이 반영된 상태에서 계산되었으므로 합쳐 보내지
+           않는다 — 합치면 같은 수업을 두 번 옮긴 경우(1→2 후 2→3)에
+           서버의 동시 적용 의미(applyMoves)와 어긋나고, incompleteUnits 의
+           콤보(fromIdx>toIdx) 병합 검사도 원본 모델 기준으로 오판할 수 있다.
+   [취소]  스테이징 전부를 버리고 서버 원본(stagedBase)으로 복원한다.
    ========================================================= */
 // 실패 응답 → 사용자 안내 문자열. 서버 reasons(원인·대처 안내)가 있으면 그것을 보여준다.
 function failText(r) {
@@ -1701,55 +1720,200 @@ function failText(r) {
   return String((r.data && r.data.error) || r.status);
 }
 
-function confirmPlan() {
+/* 서버 확정 응답을 화면 상태에 반영(기존 confirmPlan 성공 경로와 동일 필드). */
+function applyServerState(data) {
+  STATE.grid = data.grid;
+  STATE.version = data.version;
+  if (data.configVersion != null) STATE.configVersion = data.configVersion;
+  STATE.tab = data.tab;
+  STATE.config = data.config;
+  STATE.dataStart = data.dataStart || STATE.dataStart;
+  STATE.model = buildModel(STATE.grid.slice(STATE.dataStart - 1), STATE.dataStart);
+  updateUndoButton();
+  renderGrid();
+  updateToolbarNote();
+  setGroupHint('');
+  renderGradeFreeIfOpen();
+}
+
+/* 스테이징 표시 동기화: 미확정 건수·버튼 활성화·패널 본문 요약. */
+function updateStagingUi() {
+  var n = (STATE.staged || []).length;
+  var note = document.getElementById('stagedNote');
+  if (note) note.textContent = n ? ('미확정 변경 ' + n + '건') : '';
+  var bChange = document.getElementById('btnChange');
+  if (bChange) bChange.disabled = !STATE.plan;
+  var bConfirm = document.getElementById('btnConfirm');
+  if (bConfirm) {
+    bConfirm.disabled = n === 0;
+    bConfirm.classList.toggle('attn', n > 0);
+  }
+  // 계획 선택 중이 아니면 패널 본문에 스테이징 요약을 보여준다(계획 UI 는 selectPlan 이 그린다).
+  if (!STATE.plan) {
+    var el = document.getElementById('planPaths');
+    if (el) {
+      el.innerHTML = n
+        ? '<div class="paths-head">미확정 변경 ' + n + '건 — [확정]을 눌러야 시트에 저장됩니다</div>' +
+          STATE.staged.map(function (c, i) {
+            return '<div class="staged-item">' + (i + 1) + '. ' + esc(c.summary) + '</div>';
+          }).join('')
+        : '';
+    }
+  }
+}
+
+/* @staging-start
+ * 테스트가 이 구간을 통째로 추출한다 — DOM·네트워크는 주입 가능한 함수
+ * (renderGrid/renderGradeFreeIfOpen/updateUndoButton/updateStagingUi/toast/
+ *  show/alert/confirm/apiCall/loadState/failText/applyServerState/clearSelection/
+ *  handleErr/buildModel/movesToCellWrites/undoSummaryOf)에만 위임한다. */
+function hasStaged() { return !!(STATE.staged && STATE.staged.length); }
+
+// 이동(moves)을 현재 로컬 그리드에 반영한 새 그리드. 셀 좌표는 서버와 동일:
+// grid[row-1][2+idx] (movesToCellWrites 가 clear 전체 → write 전체 순서를 보장).
+function stagedNextGrid(moves) {
+  var next = STATE.grid.map(function (r) { return r.slice(); });
+  movesToCellWrites(STATE.model, moves).forEach(function (c) {
+    next[c.row - 1][2 + c.idx] = c.value;
+  });
+  return next;
+}
+
+// [변경] — 선택한 경로를 로컬 반영·스테이징. 시트에는 아직 쓰지 않는다.
+function stageChange() {
   if (!STATE.plan) return;
+  var plan = STATE.plan;
+  if (!hasStaged()) STATE.stagedBase = { grid: STATE.grid, version: STATE.version };
+  STATE.staged.push({
+    moves: plan.moves, kind: plan.kind,
+    summary: undoSummaryOf(plan.moves),   // 반영 전 모델 기준
+    prevGrid: STATE.grid                  // 이 변경 직전 그리드(로컬 undo 용)
+  });
+  STATE.grid = stagedNextGrid(plan.moves);
+  STATE.model = buildModel(STATE.grid.slice(STATE.dataStart - 1), STATE.dataStart);
+  renderGrid();   // clearSelection 포함 — 스테이징 중에는 패널이 유지된다
+  renderGradeFreeIfOpen();
+  updateUndoButton();
+  updateStagingUi();
+  toast('변경을 담았습니다 — [확정]을 눌러야 시트에 저장됩니다');
+}
+
+// 스테이징 중 Ctrl+Z: 마지막 [변경] 1건을 로컬에서 되돌린다(서버 요청 없음).
+function undoStagedChange() {
+  if (!hasStaged()) return;
+  var ch = STATE.staged.pop();
+  STATE.grid = ch.prevGrid;
+  if (!hasStaged()) STATE.stagedBase = null;
+  STATE.model = buildModel(STATE.grid.slice(STATE.dataStart - 1), STATE.dataStart);
+  renderGrid();
+  renderGradeFreeIfOpen();
+  updateUndoButton();
+  updateStagingUi();
+  toast('미확정 변경 1건을 되돌렸습니다');
+}
+
+// 스테이징 폐기 + 서버 원본 복원(화면 갱신은 호출자가 한다).
+function discardStaged() {
+  if (!hasStaged()) return;
+  STATE.grid = STATE.stagedBase.grid;
+  STATE.version = STATE.stagedBase.version;
+  STATE.staged = [];
+  STATE.stagedBase = null;
+  STATE.model = buildModel(STATE.grid.slice(STATE.dataStart - 1), STATE.dataStart);
+}
+
+// 스테이징을 잃는 동작(새로고침·탭 전환·시트 열기·탭 복제) 공용 가드. 진행하면 true.
+function confirmDiscardStaged(actionMsg) {
+  if (!hasStaged()) return true;
+  if (!confirm('미확정 변경 ' + STATE.staged.length + '건이 사라집니다. ' + actionMsg)) return false;
+  discardStaged();
+  return true;
+}
+
+// [취소] — 스테이징 전부 폐기·복원. 스테이징이 없으면 계획 선택만 해제.
+function cancelChanges() {
+  if (hasStaged()) {
+    if (!confirm('미확정 변경 ' + STATE.staged.length + '건을 모두 버리고 원래대로 되돌릴까요?')) return;
+    discardStaged();
+    renderGrid();
+    renderGradeFreeIfOpen();
+    updateUndoButton();
+    updateStagingUi();
+    toast('미확정 변경을 모두 취소했습니다');
+    return;
+  }
+  clearSelection();
+}
+
+// [확정] — 스테이징된 변경을 순서대로 서버에 저장한다.
+// 각 요청의 baseVersion 은 직전 응답의 version(첫 건은 보존한 서버 원본 version).
+// 성공한 건은 즉시 staged 에서 제거되고 되돌리기 스택에 역방향 이동으로 쌓인다.
+// 실패하면 남은 스테이징은 화면에 보존된다(성공 접두어만큼 stagedBase 를 전진).
+function commitStaged() {
+  if (!hasStaged()) return;
+  var total = STATE.staged.length;
+  var baseVersion = STATE.stagedBase.version;
+  var applied = 0;
+  var lastData = null;
   show('loading', true, 'flex');
-  apiCall('/api/apply', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sheetId: STATE.sheetId, tab: STATE.tab, moves: STATE.plan.moves,
-      baseVersion: STATE.version, kind: STATE.plan.kind
-    })
-  }).then(function (r) {
+
+  function step() {
+    if (!hasStaged()) return Promise.resolve(null);
+    var ch = STATE.staged[0];
+    return apiCall('/api/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sheetId: STATE.sheetId, tab: STATE.tab, moves: ch.moves,
+        baseVersion: baseVersion, kind: ch.kind
+      })
+    }).then(function (r) {
+      if (!r.data || !r.data.ok) return r;   // 실패 응답 → 그대로 반환(스테이징 유지)
+      STATE.undoStack.push({
+        tab: r.data.tab,
+        moves: ch.moves.map(function (mv) {
+          return { name: mv.name, row: mv.row, fromIdx: mv.toIdx, toIdx: mv.fromIdx };
+        }),
+        summary: ch.summary
+      });
+      applied++;
+      baseVersion = r.data.version;
+      lastData = r.data;
+      // 성공 접두어만큼 스테이징을 전진 — 남은 변경의 기준을 서버 확정값으로 갱신
+      STATE.staged.shift();
+      STATE.stagedBase = hasStaged() ? { grid: r.data.grid, version: r.data.version } : null;
+      return step();
+    });
+  }
+
+  return step().then(function (failed) {
     show('loading', false);
-    if (r.status === 409) {
-      var reasons = (r.data && r.data.reasons) || ['시트가 변경되었습니다.'];
-      var pre = (r.data && r.data.preexisting) || [];
-      var msg = reasons.join('\n');
-      if (pre.length) msg += '\n\n[기존 충돌(차단 아님)]\n' + pre.join('\n');
-      alert(msg);
-      loadState(STATE.sheetId, STATE.tab);
+    updateUndoButton();
+    if (!failed) {
+      applyServerState(lastData);   // renderGrid → clearSelection → 패널 숨김
+      updateStagingUi();
+      toast('변경 ' + total + '건을 시트에 저장했습니다');
       return;
     }
-    if (!r.data || !r.data.ok) { alert('적용 실패: ' + failText(r)); return; }
-    // 되돌리기 스택 push: 확정 직전(pre-apply) 모델 기준 요약 + 역방향 moves.
-    var undoEntry = {
-      tab: STATE.tab,
-      moves: STATE.plan.moves.map(function (mv) {
-        return { name: mv.name, row: mv.row, fromIdx: mv.toIdx, toIdx: mv.fromIdx };
-      }),
-      summary: undoSummaryOf(STATE.plan.moves)
-    };
-    STATE.grid = r.data.grid;
-    STATE.version = r.data.version;
-    if (r.data.configVersion != null) STATE.configVersion = r.data.configVersion;
-    STATE.tab = r.data.tab;
-    STATE.config = r.data.config;
-    STATE.dataStart = r.data.dataStart || STATE.dataStart;
-    STATE.model = buildModel(STATE.grid.slice(STATE.dataStart - 1), STATE.dataStart);
-    STATE.undoStack.push(undoEntry);
-    updateUndoButton();
-    renderGrid();
-    updateToolbarNote();
-    setGroupHint('');
-    renderGradeFreeIfOpen();
+    updateStagingUi();
+    var remain = STATE.staged.length;
+    var head = applied === 0
+      ? '저장하지 못했습니다.'
+      : '변경 ' + total + '건 중 ' + applied + '건만 저장되었습니다(저장된 건은 Ctrl+Z 로 되돌릴 수 있습니다).';
+    alert(head + '\n사유: ' + failText(failed) +
+      '\n\n미확정 변경 ' + remain + '건은 화면에 그대로 남아 있습니다.' +
+      '\n다른 사용자가 시트를 바꿨다면 [취소]로 변경을 버린 뒤 새로고침하고 다시 작업해 주세요.');
   }).catch(function (err) {
     show('loading', false);
+    updateUndoButton();
+    updateStagingUi();
     if (err && (err.auth || err.sheetsAccess)) { handleErr(err); return; }
-    alert('적용 실패: ' + (err && err.message || err));
+    alert('적용 실패: ' + (err && err.message || err) +
+      (applied ? '\n(앞의 ' + applied + '건은 이미 저장되었습니다.)' : '') +
+      '\n미확정 변경 ' + STATE.staged.length + '건은 화면에 그대로 남아 있습니다.');
   });
 }
+/* @staging-end */
 
 /* =========================================================
    되돌리기 (undo) — 스택 top 의 역방향 moves 를 kind:'undo' 로 재전송
@@ -1767,6 +1931,12 @@ function undoSummaryOf(moves) {
 function updateUndoButton() {
   var btn = document.getElementById('btnUndo');
   if (!btn) return;
+  // 스테이징 중에는 Ctrl+Z 가 마지막 [변경]을 로컬로 되돌린다(서버 undo 아님).
+  if (hasStaged()) {
+    btn.disabled = false;
+    btn.title = '되돌리기 (Ctrl+Z) — 마지막 미확정 변경: ' + STATE.staged[STATE.staged.length - 1].summary;
+    return;
+  }
   var n = STATE.undoStack.length;
   btn.disabled = n === 0;
   btn.title = n ? ('되돌리기 (Ctrl+Z) — 마지막 이동: ' + STATE.undoStack[n - 1].summary) : '되돌리기 (Ctrl+Z)';
@@ -1778,6 +1948,8 @@ function clearUndoStack() {
 }
 
 function doUndo() {
+  // 스테이징 중에는 마지막 [변경]을 로컬에서 되돌린다. 서버 undo 는 스테이징이 없을 때만.
+  if (hasStaged()) { undoStagedChange(); return; }
   if (!STATE.undoStack.length) return;
   var top = STATE.undoStack[STATE.undoStack.length - 1];
   clearSelection();
@@ -1862,6 +2034,12 @@ function afterConfigSaved(keepOpen) {
 }
 
 function postConfig(config, keepOpen) {
+  // 스테이징 중 설정 저장은 막는다 — 저장 후 검증 기준(그룹/팀/금지 슬롯)이 바뀌면
+  // 스테이징된 변경이 [확정] 시점에 오거부·오적용될 수 있다.
+  if (hasStaged()) {
+    alert('미확정 이동 변경이 있습니다.\n먼저 [확정] 또는 [취소]한 뒤 설정을 저장해 주세요.');
+    return Promise.resolve();
+  }
   show('loading', true, 'flex');
   return apiCall('/api/config', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2951,6 +3129,8 @@ function raSupBreakdownAt(idx, g) {
 function isRaAssignOpen() { return document.getElementById('raAssign').classList.contains('open'); }
 
 function openRaAssign(day, period, grade) {
+  // RA 배정은 즉시 서버 반영이라 스테이징(로컬 반영)과 충돌한다 — 스테이징 중에는 막는다.
+  if (hasStaged()) { toast('미확정 변경이 있습니다 — 먼저 [확정] 또는 [취소]하세요'); return; }
   RA_UI = { day: day, period: period, grade: grade, idx: day * 8 + (period - 1) };
   renderRaAssign();
   document.getElementById('backdrop').classList.add('on');
@@ -3054,8 +3234,10 @@ function onRaAssignBodyClick(ev) {
   }
 }
 
-// RA 배정/해제 공용 네트워크 op — confirmPlan 성공 경로를 그대로 미러
+// RA 배정/해제 공용 네트워크 op — 이동 확정 성공 경로를 그대로 미러
 function raApplyOp(kind, ops, undoEntry, successMsg) {
+  // 안전망: 스테이징 중 서버 반영은 로컬 반영본을 덮어쓴다 — 여기서도 차단.
+  if (hasStaged()) { toast('미확정 변경이 있습니다 — 먼저 [확정] 또는 [취소]하세요'); return; }
   show('loading', true, 'flex');
   var body = { sheetId: STATE.sheetId, tab: STATE.tab, baseVersion: STATE.version, kind: kind };
   if (ops.assigns) body.assigns = ops.assigns;
@@ -3628,6 +3810,10 @@ function firstDuplicateSlot(blocks) {
 }
 
 function saveSettings() {
+  if (hasStaged()) {
+    alert('미확정 이동 변경이 있습니다.\n먼저 [확정] 또는 [취소]한 뒤 설정을 저장해 주세요.');
+    return;
+  }
   var config = assembleConfig();
   var dup = firstDuplicateSlot(config.fixedBlocks);
   if (dup !== -1) { alert('같은 슬롯에 규칙이 중복되었습니다: ' + slotLabel(dup) + '\n한 슬롯에는 하나의 규칙만 지정하세요.'); return; }
@@ -3654,10 +3840,15 @@ window.addEventListener('load', function () {
   });
   document.getElementById('tabSelect').addEventListener('change', function (ev) {
     var v = ev.target.value;
-    if (v && v !== STATE.tab) { clearUndoStack(); loadState(STATE.sheetId, v); }
+    if (!v || v === STATE.tab) return;
+    if (!confirmDiscardStaged('탭을 전환할까요?')) { setTabSelection(); return; }
+    clearUndoStack(); loadState(STATE.sheetId, v);
   });
   document.getElementById('btnDuplicate').addEventListener('click', duplicateTab);
-  document.getElementById('btnRefresh').addEventListener('click', function () { clearUndoStack(); loadState(STATE.sheetId, STATE.tab); });
+  document.getElementById('btnRefresh').addEventListener('click', function () {
+    if (!confirmDiscardStaged('새로고침할까요?')) return;
+    clearUndoStack(); loadState(STATE.sheetId, STATE.tab);
+  });
   document.getElementById('btnUndo').addEventListener('click', doUndo);
   document.getElementById('btnSettings').addEventListener('click', openSettings);
   document.getElementById('btnCloseRaAssign').addEventListener('click', closeRaAssign);
@@ -3669,8 +3860,9 @@ window.addEventListener('load', function () {
     this.setAttribute('aria-pressed', on ? 'true' : 'false');
     fitCells();
   });
-  document.getElementById('btnConfirm').addEventListener('click', confirmPlan);
-  document.getElementById('btnCancel').addEventListener('click', clearSelection);
+  document.getElementById('btnChange').addEventListener('click', stageChange);
+  document.getElementById('btnConfirm').addEventListener('click', commitStaged);
+  document.getElementById('btnCancel').addEventListener('click', cancelChanges);
   document.getElementById('panelToggle').addEventListener('click', togglePanelCollapse);
   document.querySelector('#panel h3').addEventListener('click', togglePanelCollapse);
 
@@ -3701,7 +3893,7 @@ window.addEventListener('load', function () {
       var tag = t && t.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
       ev.preventDefault();
-      if (STATE.undoStack.length) doUndo();
+      if (hasStaged() || STATE.undoStack.length) doUndo();
       return;
     }
     if (ev.key !== 'Escape') return;
@@ -3712,6 +3904,13 @@ window.addEventListener('load', function () {
 
   document.getElementById('btnLogout').addEventListener('click', doLogout);
   if (DEV_MODE) show('btnLogout', false);   // 개발 모드에는 로그인 개념이 없다
+
+  // 브라우저 새로고침/닫기: 미저장 작업(스테이징 포함)이 있으면 브라우저 확인 대화상자
+  window.addEventListener('beforeunload', function (ev) {
+    if (!hasUnsavedWork()) return;
+    ev.preventDefault();
+    ev.returnValue = '';
+  });
 
   // GSI 스크립트가 이 스크립트보다 먼저 로드/실패한 경우(함수 미정의 시점) 놓친 이벤트를 보정한다.
   if (window.__gsiScript === 'loaded') gsiLoaded();

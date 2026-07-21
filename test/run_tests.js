@@ -2813,6 +2813,7 @@ await (async function () {
   check('로그아웃: 확인 수락 시 ID 토큰 삭제', h.env.stored.idToken === '');
   check('로그아웃: STATE.plan 정리', h.STATE.plan === null && h.STATE.target === null && h.STATE.planTo === null);
   check('로그아웃: 되돌리기 스택 비움', h.STATE.undoStack.length === 0);
+  check('로그아웃: 스테이징 정리', h.STATE.staged.length === 0 && h.STATE.stagedBase === null);
   check('로그아웃: 모드 해제', h.STATE.unavailMode === false);
   check('로그아웃: 사용자 정보 제거', h.STATE.user === '');
   check('로그아웃: 설정 초안 정리', h.draft() === null && h.settingsDirty() === false);
@@ -2820,6 +2821,7 @@ await (async function () {
   // (4) 미저장 판정: 설정 초안 dirty / 불가시간 dirty 도 경고 대상
   check('미저장 판정: 설정 모달 dirty', build({ settingsDirty: true }).hasUnsavedWork() === true);
   check('미저장 판정: 불가 시간 dirty', build({ state: { unavailDirty: true } }).hasUnsavedWork() === true);
+  check('미저장 판정: 스테이징된 [변경]도 경고 대상', build({ state: { staged: [{ summary: 's' }] } }).hasUnsavedWork() === true);
   check('미저장 판정: 확정된 이동(undoStack)은 미저장이 아님', build({ state: { undoStack: [{ summary: 'x' }] } }).hasUnsavedWork() === false);
   check('미저장 판정: 깨끗한 상태', build({}).hasUnsavedWork() === false);
 
@@ -2886,7 +2888,8 @@ await (async function () {
   check('RA행 모드 버튼 마크업', /<button id="btnRaRows" type="button" class="tb-mode"/.test(html));
   check('RA행/불가 시간 버튼 스타일 통일(tb-mode)', /id="btnUnavailMode" type="button" class="tb-mode"/.test(html)
     && /#toolbar button\.tb-mode\.active/.test(html));
-  const raBind = html.slice(html.indexOf("getElementById('btnRaRows')"), html.indexOf("getElementById('btnConfirm')"));
+  // 끝 앵커: 스테이징 도입 후 btnConfirm 참조가 updateStagingUi 에도 있으므로 바인딩 라인으로 자른다.
+  const raBind = html.slice(html.indexOf("getElementById('btnRaRows')"), html.indexOf(".addEventListener('click', stageChange)"));
   check('RA행 버튼이 show-ra 를 토글', /classList\.toggle\('show-ra'\)/.test(raBind));
   check('RA행 버튼이 active 상태를 표시', /classList\.toggle\('active', on\)/.test(raBind));
   check('RA행 버튼이 셀 크기 재계산(fitCells) 호출', /fitCells\(\)/.test(raBind));
@@ -3624,6 +3627,222 @@ await (async function () {
       check('apply config_unavailable 시 시트에 쓰기 없음', store.writes.length === 0);
     }
   }
+})();
+
+/* =========================================================
+   변경→확정 2단계 스테이징(index.html @staging) — 실제 소스를 그대로 실행한다.
+   DOM/네트워크는 가짜(renderGrid/toast/alert/confirm/apiCall 등)로 주입한다.
+   ========================================================= */
+await (async function () {
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const start = html.indexOf('/* @staging-start');
+  const endMark = html.indexOf('/* @staging-end */', start);
+  check('index.html 에서 @staging 구간 추출', start > 0 && endMark > start);
+  const src = html.slice(start, endMark);
+
+  // 데이터 시작 3행 그리드(슬롯 열 = 2+idx): row3 T1(Kor10A@월1), row4 T2(Eng11A@월2)
+  const mkGrid = function () {
+    const pad = (a) => a.concat(new Array(42 - a.length).fill(''));
+    return [
+      pad(['', '']),
+      pad(['교사', '', 'Mon1']),
+      pad(['T1', 'R1', 'Kor10A']),
+      pad(['T2', 'R2', '', 'Eng11A'])
+    ];
+  };
+
+  const build = function (opts) {
+    const o = opts || {};
+    const env = { renders: 0, toasts: [], alerts: [], confirms: [], applyCalls: [], serverApplied: [] };
+    const STATE = {
+      sheetId: 'S', tab: 'revised', dataStart: 3, version: 'v0',
+      grid: mkGrid(), model: null, plan: null, target: null, plans: null, planTo: null,
+      undoStack: [], staged: [], stagedBase: null
+    };
+    STATE.model = CORE.buildModel(STATE.grid.slice(2), 3);
+    const api = new Function(
+      'STATE', 'buildModel', 'movesToCellWrites', 'undoSummaryOf',
+      'renderGrid', 'renderGradeFreeIfOpen', 'updateUndoButton', 'updateStagingUi',
+      'toast', 'show', 'alert', 'confirm', 'apiCall', 'failText',
+      'applyServerState', 'clearSelection', 'handleErr',
+      src + '\nreturn { hasStaged, stageChange, undoStagedChange, discardStaged, confirmDiscardStaged, cancelChanges, commitStaged, stagedNextGrid };'
+    )(
+      STATE, CORE.buildModel, CORE.movesToCellWrites,
+      function (moves) { return 'sum' + moves.length; },
+      function () { env.renders++; }, function () {}, function () {}, function () {},
+      function (m) { env.toasts.push(m); }, function () {},
+      function (m) { env.alerts.push(m); },
+      function (m) { env.confirms.push(m); return o.confirmYes !== false; },
+      o.apiCall || function () { throw new Error('no apiCall'); },
+      function (r) { return String((r.data && r.data.error) || r.status); },
+      function (data) { env.serverApplied.push(data); },
+      function () { STATE.plan = null; STATE.target = null; },
+      function () {}
+    );
+    api.env = env;
+    api.STATE = STATE;
+    return api;
+  };
+  const mv = function (row, from, to) { return { name: row === 3 ? 'T1' : 'T2', row: row, fromIdx: from, toIdx: to }; };
+  const stage2 = function (h) {
+    h.STATE.plan = { kind: 'direct', moves: [mv(3, 0, 2)] };   // Kor10A 월1→월3
+    h.stageChange();
+    h.STATE.plan = { kind: 'direct', moves: [mv(3, 2, 3)] };   // 반영본 기준: 월3→월4
+    h.stageChange();
+  };
+
+  // (1) [변경] — 로컬 반영 + 스테이징, 서버 원본 보존
+  let h = build({});
+  const g0 = h.STATE.grid;
+  h.STATE.plan = { kind: 'direct', moves: [mv(3, 0, 2)] };
+  h.stageChange();
+  check('[변경] staged 1건 쌓임', h.STATE.staged.length === 1 && h.hasStaged());
+  check('[변경] 서버 원본(grid·version) 보존', h.STATE.stagedBase.grid === g0 && h.STATE.stagedBase.version === 'v0');
+  check('[변경] 그리드 로컬 반영(월1 비움, 월3 채움)', h.STATE.grid[2][2] === '' && h.STATE.grid[2][4] === 'Kor10A');
+  check('[변경] 모델 재구축(다음 계획의 기준)', h.STATE.model.entries[0].slots[2] === 'Kor10A' && h.STATE.model.entries[0].slots[0] === '');
+  check('[변경] STATE.version 은 서버 값 유지', h.STATE.version === 'v0');
+  check('[변경] 원본 그리드는 변형되지 않음', g0[2][2] === 'Kor10A');
+
+  // (2) 두 번째 [변경]은 첫 번째 반영본 기준으로 계산된다
+  h.STATE.plan = { kind: 'direct', moves: [mv(3, 2, 3)] };
+  h.stageChange();
+  check('[변경] 2건째: 반영본 기준 이동(월3→월4)', h.STATE.staged.length === 2
+    && h.STATE.grid[2][4] === '' && h.STATE.grid[2][5] === 'Kor10A');
+
+  // (3) 스테이징 중 Ctrl+Z = 마지막 [변경] 로컬 되돌리기
+  h.undoStagedChange();
+  check('스테이징 undo: 마지막 변경만 되돌림', h.STATE.staged.length === 1
+    && h.STATE.grid[2][4] === 'Kor10A' && h.STATE.grid[2][5] === '');
+  h.undoStagedChange();
+  check('스테이징 undo: 전부 되돌리면 원본 복귀', h.STATE.staged.length === 0
+    && h.STATE.grid === g0 && h.STATE.stagedBase === null);
+
+  // (4) [취소] — 전부 폐기하고 서버 원본 복원
+  h = build({});
+  const g1 = h.STATE.grid;
+  stage2(h);
+  h.cancelChanges();
+  check('[취소] 확인 대화상자', h.env.confirms.length === 1 && /미확정 변경 2건/.test(h.env.confirms[0]));
+  check('[취소] 원본 그리드·모델 복원', h.STATE.grid === g1 && h.STATE.model.entries[0].slots[0] === 'Kor10A');
+  check('[취소] 스테이징 비움', h.STATE.staged.length === 0 && h.STATE.stagedBase === null);
+  h = build({ confirmYes: false });
+  stage2(h);
+  h.cancelChanges();
+  check('[취소] 거부 시 스테이징 유지', h.STATE.staged.length === 2);
+
+  // (5) [확정] — 한 건씩 순서대로 재생, baseVersion 체이닝, undo 스택 적재
+  const okApi = function (env) {
+    return function (path, opts) {
+      const body = JSON.parse(opts.body);
+      env.applyCalls.push(body);
+      const n = env.applyCalls.length;
+      return Promise.resolve({ status: 200, ok: true, data: {
+        ok: true, version: 'v' + n, tab: 'revised', grid: mkGrid(), config: {}, dataStart: 3
+      } });
+    };
+  };
+  const hOk = (function () {
+    const holder = {};
+    const b = build({ apiCall: function (path, opts) { return holder.fn(path, opts); } });
+    holder.fn = okApi(b.env);
+    return b;
+  })();
+  stage2(hOk);
+  await hOk.commitStaged();
+  check('[확정] 요청이 변경 건수만큼 순서대로 나감', hOk.env.applyCalls.length === 2
+    && hOk.env.applyCalls[0].moves[0].fromIdx === 0 && hOk.env.applyCalls[0].moves[0].toIdx === 2
+    && hOk.env.applyCalls[1].moves[0].fromIdx === 2 && hOk.env.applyCalls[1].moves[0].toIdx === 3);
+  check('[확정] baseVersion 체이닝(v0 → 직전 응답 version)',
+    hOk.env.applyCalls[0].baseVersion === 'v0' && hOk.env.applyCalls[1].baseVersion === 'v1');
+  check('[확정] 페이로드에 sheetId/tab/kind 포함',
+    hOk.env.applyCalls.every(function (b) { return b.sheetId === 'S' && b.tab === 'revised' && b.kind === 'direct'; }));
+  check('[확정] 성공 시 스테이징 비움', hOk.STATE.staged.length === 0 && hOk.STATE.stagedBase === null);
+  check('[확정] 마지막 응답으로 화면 상태 갱신', hOk.env.serverApplied.length === 1);
+  check('[확정] 되돌리기 스택에 역방향 이동 적재', hOk.STATE.undoStack.length === 2
+    && hOk.STATE.undoStack[1].moves[0].fromIdx === 3 && hOk.STATE.undoStack[1].moves[0].toIdx === 2);
+  check('[확정] 저장 토스트', hOk.env.toasts.some(function (t) { return /2건.*저장/.test(t); }));
+
+  // (6) [확정] 첫 건 409 — 스테이징을 잃지 않고 안내한다
+  const staleApi = function (env) {
+    return function (path, opts) {
+      env.applyCalls.push(JSON.parse(opts.body));
+      return Promise.resolve({ status: 409, ok: false, data: { ok: false, error: 'stale', reasons: ['시트가 변경되었습니다. 새로고침 후 다시 시도하세요.'] } });
+    };
+  };
+  const hStale = (function () {
+    const holder = {};
+    const b = build({ apiCall: function (p, o2) { return holder.fn(p, o2); } });
+    holder.fn = staleApi(b.env);
+    return b;
+  })();
+  stage2(hStale);
+  await hStale.commitStaged();
+  check('[확정] 409: 첫 건에서 중단(요청 1회)', hStale.env.applyCalls.length === 1);
+  check('[확정] 409: 스테이징 보존', hStale.STATE.staged.length === 2 && hStale.STATE.stagedBase.version === 'v0');
+  check('[확정] 409: undo 스택 미적재', hStale.STATE.undoStack.length === 0);
+  check('[확정] 409: 안내(스테이징 유지 + 취소/새로고침)',
+    hStale.env.alerts.length === 1 && /남아 있습니다/.test(hStale.env.alerts[0]) && /\[취소\]/.test(hStale.env.alerts[0]));
+
+  // (7) [확정] 중간 실패 — 성공 접두어만큼 확정되고 나머지는 미확정으로 남는다
+  const midFailApi = function (env) {
+    return function (path, opts) {
+      const body = JSON.parse(opts.body);
+      env.applyCalls.push(body);
+      if (env.applyCalls.length === 1) {
+        return Promise.resolve({ status: 200, ok: true, data: { ok: true, version: 'v1', tab: 'revised', grid: mkGrid(), config: {}, dataStart: 3 } });
+      }
+      return Promise.resolve({ status: 409, ok: false, data: { ok: false, error: 'stale', reasons: ['시트가 변경되었습니다.'] } });
+    };
+  };
+  const hMid = (function () {
+    const holder = {};
+    const b = build({ apiCall: function (p, o2) { return holder.fn(p, o2); } });
+    holder.fn = midFailApi(b.env);
+    return b;
+  })();
+  stage2(hMid);
+  await hMid.commitStaged();
+  check('[확정] 부분 실패: 성공 1건은 undo 스택에', hMid.STATE.undoStack.length === 1);
+  check('[확정] 부분 실패: 남은 1건은 스테이징 유지 + 기준 전진(v1)',
+    hMid.STATE.staged.length === 1 && hMid.STATE.stagedBase.version === 'v1');
+  check('[확정] 부분 실패: 안내(N건 중 k건 + Ctrl+Z)',
+    hMid.env.alerts.length === 1 && /2건 중 1건만 저장/.test(hMid.env.alerts[0]) && /Ctrl\+Z/.test(hMid.env.alerts[0]));
+
+  // (8) 스테이징을 버리는 동작 공용 가드
+  h = build({});
+  stage2(h);
+  check('가드: 확인 수락 → 폐기 후 진행', h.confirmDiscardStaged('새로고침할까요?') === true && h.STATE.staged.length === 0);
+  h = build({ confirmYes: false });
+  stage2(h);
+  check('가드: 확인 거부 → 중단·스테이징 유지', h.confirmDiscardStaged('새로고침할까요?') === false && h.STATE.staged.length === 2);
+  h = build({});
+  check('가드: 스테이징 없으면 조용히 통과', h.confirmDiscardStaged('x') === true && h.env.confirms.length === 0);
+
+  // (9) 마크업·배선·차단 지점(소스 검사)
+  const bar = html.slice(html.indexOf('id="panelBar"'), html.indexOf('id="panelBody"'));
+  check('패널 버튼 순서: 변경 → 확정 → 취소',
+    /id="btnChange"[\s\S]*?id="btnConfirm"[\s\S]*?id="btnCancel"/.test(bar));
+  check('미확정 표시 요소(stagedNote) 존재', /id="stagedNote"/.test(bar));
+  check('버튼 배선: 변경/확정/취소',
+    /btnChange'\)\.addEventListener\('click', stageChange\)/.test(html)
+    && /btnConfirm'\)\.addEventListener\('click', commitStaged\)/.test(html)
+    && /btnCancel'\)\.addEventListener\('click', cancelChanges\)/.test(html));
+  check('새로고침 버튼 스테이징 가드', /confirmDiscardStaged\('새로고침할까요\?'\)/.test(html));
+  check('탭 전환 스테이징 가드(거부 시 선택 복원)',
+    /confirmDiscardStaged\('탭을 전환할까요\?'\)\) \{ setTabSelection\(\); return; \}/.test(html));
+  check('시트 열기/탭 복제 스테이징 가드',
+    /confirmDiscardStaged\('다른 시트를 열까요\?'\)/.test(html) && /confirmDiscardStaged\('탭을 복제할까요\?/.test(html));
+  check('RA 배정 스테이징 차단(openRaAssign·raApplyOp)',
+    /function openRaAssign\(day, period, grade\) \{\n  \/\/[^\n]*\n  if \(hasStaged\(\)\)/.test(html)
+    && /function raApplyOp\(kind, ops, undoEntry, successMsg\) \{\n  \/\/[^\n]*\n  if \(hasStaged\(\)\)/.test(html));
+  check('설정 저장 스테이징 차단(saveSettings·postConfig)',
+    /function saveSettings\(\) \{\n  if \(hasStaged\(\)\)/.test(html)
+    && /function postConfig\(config, keepOpen\) \{\n  \/\/[\s\S]{0,200}?if \(hasStaged\(\)\)/.test(html));
+  check('불가 시간 모드 진입 차단', /toggleUnavailMode[\s\S]{0,400}?if \(hasStaged\(\)\)/.test(html));
+  check('Ctrl+Z 스테이징 분기(doUndo 선두)', /if \(hasStaged\(\)\) \{ undoStagedChange\(\); return; \}/.test(html));
+  check('beforeunload 미저장 경고', /beforeunload[\s\S]{0,120}?hasUnsavedWork\(\)/.test(html));
+  check('onState 가 스테이징을 초기화', /STATE\.staged = \[\]; STATE\.stagedBase = null;   \/\/ 서버 최신 상태가 기준/.test(html));
+  check('clearSelection 이 스테이징 중 패널 유지', /show\('panel', hasStaged\(\)\)/.test(html));
 })();
 
 console.log('');
