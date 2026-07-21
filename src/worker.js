@@ -341,6 +341,15 @@ async function handleApply(sf, sheetId, body, payload) {
   const dataStart = tt.dataStart;
   const dataEnd = lastDataRow(grid);
   const cv = await readConfigWithVersion(sf, sheetsList);
+  // 설정 조회 실패를 "빈 설정"으로 위장한 채 검증하면 안 된다 — 연결그룹/팀티칭이
+  // 비어 보여서 정당한 그룹 이동이 incomplete_unit 으로 거부되거나, 반대로
+  // 고정블록·교사불가 검증이 빠진 채 기록될 수 있다. 실패면 적용 자체를 거부한다.
+  if (cv.unavailable) {
+    return json({
+      ok: false, error: 'config_unavailable',
+      reasons: ['설정을 불러오지 못해 적용할 수 없습니다. 잠시 후 다시 시도해 주세요.']
+    }, 503);
+  }
   const config = cv.config;
   const lp = await readLinkedPinned(sf, sheetsList);
   CORE.resolvePinned(config, lp.pinned);
@@ -395,7 +404,10 @@ async function handleApply(sf, sheetId, body, payload) {
     const dataStart2 = tt2 ? tt2.dataStart : dataStart;
     const dataEnd2 = lastDataRow(grid2);
     const version2 = hashGrid(grid2, dataStart2, dataEnd2);
-    const cv2 = await readConfigWithVersion(sf, sheetsList);
+    // 재조회 실패 시 적용 전 설정(cv, 위에서 가용 확인됨)으로 응답한다 — 빈 config 를
+    // 내려보내면 클라이언트가 그룹/팀 정보 없이 다음 이동을 계획해 incomplete_unit 이 난다.
+    let cv2 = await readConfigWithVersion(sf, sheetsList);
+    if (cv2.unavailable) cv2 = cv;
     CORE.resolvePinned(cv2.config, lp.pinned);
     deriveClasslessFromGrades(cv2.config, lp.grades);
     return json({
@@ -411,7 +423,10 @@ async function handleApply(sf, sheetId, body, payload) {
     return json({ ok: false, error: 'invalid_move', reasons: ['교사 행이 아닌 대상은 이동할 수 없습니다.'] }, 400);
   }
   if (incompleteUnits(model, config, moves, CORE.expandUnit).length) {
-    return json({ ok: false, error: 'incomplete_unit', reasons: ['그룹/팀 이동은 전체가 함께 이동해야 합니다.'] }, 400);
+    return json({
+      ok: false, error: 'incomplete_unit',
+      reasons: ['그룹/팀 이동은 전체가 함께 이동해야 합니다. 설정(연결그룹·팀티칭)이 그 사이 변경되었을 수 있으니 새로고침 후 다시 시도해 주세요.']
+    }, 400);
   }
   const delta = CORE.checkMovesDelta(model, config, moves);
   if (delta.blocks.length) {
@@ -447,7 +462,9 @@ async function handleApply(sf, sheetId, body, payload) {
   const dataStart2 = tt2 ? tt2.dataStart : dataStart;
   const dataEnd2 = lastDataRow(grid2);
   const version2 = hashGrid(grid2, dataStart2, dataEnd2);
-  const cv2 = await readConfigWithVersion(sf, sheetsList);
+  // 재조회 실패 시 적용 전 설정(cv)으로 응답 — 위 RA 경로의 주석과 같은 이유.
+  let cv2 = await readConfigWithVersion(sf, sheetsList);
+  if (cv2.unavailable) cv2 = cv;
   CORE.resolvePinned(cv2.config, lp.pinned);
   deriveClasslessFromGrades(cv2.config, lp.grades);
   return json({
@@ -611,7 +628,10 @@ function handleApplyDev(body, payload) {
     return json({ ok: false, error: 'invalid_move', reasons: ['교사 행이 아닌 대상은 이동할 수 없습니다.'] }, 400);
   }
   if (incompleteUnits(model, config, moves, CORE.expandUnit).length) {
-    return json({ ok: false, error: 'incomplete_unit', reasons: ['그룹/팀 이동은 전체가 함께 이동해야 합니다.'] }, 400);
+    return json({
+      ok: false, error: 'incomplete_unit',
+      reasons: ['그룹/팀 이동은 전체가 함께 이동해야 합니다. 설정(연결그룹·팀티칭)이 그 사이 변경되었을 수 있으니 새로고침 후 다시 시도해 주세요.']
+    }, 400);
   }
   const delta = CORE.checkMovesDelta(model, config, moves);
   if (delta.blocks.length) {

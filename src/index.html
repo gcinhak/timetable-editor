@@ -1694,6 +1694,13 @@ function renderSelectedPlan(i) {
 /* =========================================================
    확정 (POST /api/apply)
    ========================================================= */
+// 실패 응답 → 사용자 안내 문자열. 서버 reasons(원인·대처 안내)가 있으면 그것을 보여준다.
+function failText(r) {
+  var reasons = (r.data && r.data.reasons) || [];
+  if (reasons.length) return reasons.join('\n');
+  return String((r.data && r.data.error) || r.status);
+}
+
 function confirmPlan() {
   if (!STATE.plan) return;
   show('loading', true, 'flex');
@@ -1715,7 +1722,7 @@ function confirmPlan() {
       loadState(STATE.sheetId, STATE.tab);
       return;
     }
-    if (!r.data || !r.data.ok) { alert('적용 실패: ' + (r.data && r.data.error || r.status)); return; }
+    if (!r.data || !r.data.ok) { alert('적용 실패: ' + failText(r)); return; }
     // 되돌리기 스택 push: 확정 직전(pre-apply) 모델 기준 요약 + 역방향 moves.
     var undoEntry = {
       tab: STATE.tab,
@@ -1798,7 +1805,7 @@ function doUndo() {
       loadState(STATE.sheetId, STATE.tab);
       return;
     }
-    if (!r.data || !r.data.ok) { alert('되돌리기 실패: ' + (r.data && r.data.error || r.status)); return; }
+    if (!r.data || !r.data.ok) { alert('되돌리기 실패: ' + failText(r)); return; }
     STATE.grid = r.data.grid;
     STATE.version = r.data.version;
     if (r.data.configVersion != null) STATE.configVersion = r.data.configVersion;

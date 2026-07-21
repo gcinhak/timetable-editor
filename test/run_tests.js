@@ -724,6 +724,66 @@ await (async function () {
 }
 
 /* =========================================================
+   13b. incompleteUnits — 한 콤보(fromIdx>toIdx)에 서로 다른 단위 여럿 (회귀:
+   맞교환/연쇄가 만든 정상 계획이 incomplete_unit 으로 거부되던 버그)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const empty = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: {} };
+
+  // 재현 시나리오: P1 Kor7A@F 를 T 로. P2 는 F(Mat8A)·T(Eng7A) 두 열 모두 점유.
+  // planSwapTo(Kempe) 는 [P1 F→T, P2 T→F, P2 F→T] 를 만든다 — 콤보 F>T 에 두 단위.
+  const rows = [dataRow('P1', { 0: 'Kor7A' }), dataRow('P2', { 0: 'Mat8A', 1: 'Eng7A' })];
+  const model = CORE.buildModel(rows, 3);
+  const sw = CORE.planSwapTo(model, empty, { name: 'P1', row: 3, fromIdx: 0 }, 1);
+  check('맞교환 재현 계획 생성(3건, 무충돌)', !!sw && sw.moves.length === 3 &&
+    CORE.checkMovesDelta(model, empty, sw.moves).blocks.length === 0);
+  check('맞교환 계획(같은 콤보에 두 단위) → incompleteUnits 통과',
+    eq(incompleteUnits(model, empty, sw.moves, CORE.expandUnit), []));
+
+  // undo(역방향)도 대칭으로 통과해야 한다: 적용 후 모델 기준으로 역 moves 검사.
+  const applied = CORE.buildModel([
+    dataRow('P1', { 1: 'Kor7A' }), dataRow('P2', { 0: 'Eng7A', 1: 'Mat8A' })
+  ], 3);
+  const undoMoves = sw.moves.map(function (m) { return { name: m.name, row: m.row, fromIdx: m.toIdx, toIdx: m.fromIdx }; });
+  check('맞교환 undo(역방향 moves) → incompleteUnits 통과',
+    eq(incompleteUnits(applied, empty, undoMoves, CORE.expandUnit), []));
+
+  // 다단위 허용이 그룹 찢김 감지를 약화시키지 않는다:
+  // 그룹 {KorA7A, KorB7A} 중 A 만 + 무관 교사 C 를 같은 콤보로 제출 → 여전히 거부.
+  const rows2 = [
+    dataRow('A', { 0: 'KorA7A' }), dataRow('B', { 0: 'KorB7A' }), dataRow('C', { 0: 'Sci8B' })
+  ];
+  const model2 = CORE.buildModel(rows2, 3);
+  const grpCfg = { fixedBlocks: [], classless: {}, teamTeaching: {}, linkedGroups: { '분반7A': ['KorA7A', 'KorB7A'] } };
+  const tornPlus = [
+    { name: 'A', row: 3, fromIdx: 0, toIdx: 1 },   // 그룹 일부만
+    { name: 'C', row: 5, fromIdx: 0, toIdx: 1 }    // 무관 단독 이동(같은 콤보)
+  ];
+  check('다단위 콤보에서도 그룹 찢김은 여전히 감지',
+    incompleteUnits(model2, grpCfg, tornPlus, CORE.expandUnit).length > 0);
+  // 그룹 전체 + 무관 단독 이동이 같은 콤보 → 정상.
+  const fullPlus = [
+    { name: 'A', row: 3, fromIdx: 0, toIdx: 1 },
+    { name: 'B', row: 4, fromIdx: 0, toIdx: 1 },
+    { name: 'C', row: 5, fromIdx: 0, toIdx: 1 }
+  ];
+  check('그룹 전체 + 무관 이동이 같은 콤보 → incompleteUnits 통과',
+    eq(incompleteUnits(model2, grpCfg, fullPlus, CORE.expandUnit), []));
+
+  // 팀티칭 찢김도 유지: 팀 {T1,T2} 의 T1 만 제출 → 거부.
+  const rows3 = [dataRow('T1', { 0: 'Lab9A' }), dataRow('T2', { 0: 'Lab9A' })];
+  const model3 = CORE.buildModel(rows3, 3);
+  const teamCfg = { fixedBlocks: [], classless: {}, teamTeaching: { 'Lab9A': ['T1', 'T2'] }, linkedGroups: {} };
+  check('팀티칭 일부만 제출 → 여전히 거부',
+    incompleteUnits(model3, teamCfg, [{ name: 'T1', row: 3, fromIdx: 0, toIdx: 1 }], CORE.expandUnit).length > 0);
+}
+
+/* =========================================================
    14. parseLinkedGroups — '연결그룹' 탭 파싱(그룹핑 + 그룹 내 중복 제거)
    ========================================================= */
 {
@@ -3388,6 +3448,82 @@ await (async function () {
     check('설정 조회 실패 상태에서 저장은 503 config_unavailable 로 거부',
       r.out.status === 503 && r.out.body.error === 'config_unavailable');
     check('config_unavailable 시 시트에 쓰기 없음', store.writes.length === 0);
+  }
+
+  /* (13) /api/apply — incomplete_unit 회귀(맞교환 다단위 콤보) + 설정 조회 실패 안전장치 */
+  {
+    // 맞교환(Kempe) 재현 그리드: P1 Kor7A@Mon1 를 Mon2 로. P2 는 Mon1(Mat8A)·Mon2(Eng7A) 모두 점유.
+    // planSwapTo 산출과 동일한 [P1 0→1, P2 1→0, P2 0→1] — 콤보 0>1 에 서로 다른 두 단위.
+    function swapGrid() {
+      const g = [];
+      g.push(['교사', '교실'].concat(new Array(40).fill('')));
+      const hdr = ['', ''];
+      ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].forEach(function (d) {
+        for (let p = 1; p <= 8; p++) hdr.push(d + p);
+      });
+      g.push(hdr);
+      const row = function (name, room, slotMap) {
+        const r = [name, room];
+        for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+        return r;
+      };
+      g.push(row('P1', 'R1', { 0: 'Kor7A' }));
+      g.push(row('P2', 'R2', { 0: 'Mat8A', 1: 'Eng7A' }));
+      return g;
+    }
+    const swapMoves = [
+      { name: 'P1', row: 3, fromIdx: 0, toIdx: 1 },
+      { name: 'P2', row: 4, fromIdx: 1, toIdx: 0 },
+      { name: 'P2', row: 4, fromIdx: 0, toIdx: 1 }
+    ];
+    {
+      const store = makeStore({ grid: swapGrid() });
+      const r = await withStore(store, async function () {
+        const res = await call('/api/apply', {
+          method: 'POST',
+          body: JSON.stringify({ tab: 'revised', moves: swapMoves, kind: 'swap' })
+        });
+        return { status: res.status, body: await res.json() };
+      });
+      check('맞교환(같은 콤보 두 단위) apply → 200 (회귀: incomplete_unit 오거부)',
+        r.out.status === 200 && r.out.body.ok === true);
+      check('맞교환 apply 가 셀 쓰기를 수행', store.writes.length > 0);
+    }
+    {
+      // 그룹 찢김은 여전히 400: G1={Kor10A,Kor10B} 중 Kor10A 만 이동 제출.
+      const store = makeStore({ grid: (function () {
+        const g = swapGrid();
+        g[2] = ['P1', 'R1', 'Kor10A'].concat(new Array(39).fill(''));
+        g[3] = ['P2', 'R2', 'Kor10B'].concat(new Array(39).fill(''));
+        return g;
+      })() });
+      const r = await withStore(store, async function () {
+        const res = await call('/api/apply', {
+          method: 'POST',
+          body: JSON.stringify({ tab: 'revised', moves: [{ name: 'P1', row: 3, fromIdx: 0, toIdx: 1 }] })
+        });
+        return { status: res.status, body: await res.json() };
+      });
+      check('연결그룹 일부만 apply → 400 incomplete_unit 유지',
+        r.out.status === 400 && r.out.body.error === 'incomplete_unit');
+      check('incomplete_unit reasons 에 새로고침 안내 포함',
+        /새로고침/.test((r.out.body.reasons || []).join('')));
+      check('incomplete_unit 시 시트에 쓰기 없음', store.writes.length === 0);
+    }
+    {
+      // 설정 조회 실패 시 빈 설정으로 검증하지 않는다 → 503, 쓰기 없음.
+      const store = makeStore({ grid: swapGrid(), failConfigRead: 1 });
+      const r = await withStore(store, async function () {
+        const res = await call('/api/apply', {
+          method: 'POST',
+          body: JSON.stringify({ tab: 'revised', moves: swapMoves })
+        });
+        return { status: res.status, body: await res.json() };
+      });
+      check('apply 전 설정 조회 실패 → 503 config_unavailable (빈 설정 검증 금지)',
+        r.out.status === 503 && r.out.body.error === 'config_unavailable');
+      check('apply config_unavailable 시 시트에 쓰기 없음', store.writes.length === 0);
+    }
   }
 })();
 

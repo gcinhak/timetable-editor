@@ -78,8 +78,13 @@ export function nonTeacherRows(model, moves) {
     .map(function (m) { return m.row; });
 }
 
-// 제출된 moves 를 그룹(fromIdx>toIdx)별로 묶어, 각 그룹이 expandUnit 로 확장한
-// 완전한 단위(연결그룹/팀티칭)와 일치하는지 검증. 불일치 그룹 키 배열 반환(빈 배열=정상).
+// 제출된 moves 를 그룹(fromIdx>toIdx)별로 묶어, 각 이동의 단위(연결그룹/팀티칭)가
+// 찢어지지 않고 통째로 제출되었는지 검증. 위반 그룹 키 배열 반환(빈 배열=정상).
+// 한 콤보에는 서로 다른 단위가 여럿 올 수 있다 — 맞교환(swap)·연쇄(chain)는 서로 다른
+// 단위를 같은 방향으로 함께 밀어낸다(예: F↔T 맞교환에서 상대 교사의 F열 수업도 F→T).
+// 그래서 "콤보 전체 = 대표 1개의 확장"이 아니라, "제출된 각 이동의 확장(expandUnit)이
+// 같은 콤보 안에 전부 포함되는가"를 검사한다. 각 이동은 자기 확장에 반드시 포함되므로
+// 이 검사를 통과한 콤보는 완전한 단위들의 합집합이다 → 그룹/팀 찢김은 여전히 차단된다.
 export function incompleteUnits(model, config, moves, expandUnit) {
   const groups = {};
   (moves || []).forEach(function (m) {
@@ -90,11 +95,13 @@ export function incompleteUnits(model, config, moves, expandUnit) {
   const offending = [];
   Object.keys(groups).forEach(function (gk) {
     const submitted = groups[gk];
-    const rep = submitted[0];
-    const expected = expandUnit(model, config, { name: rep.name, row: rep.row, fromIdx: rep.fromIdx, toIdx: rep.toIdx }) || [];
-    const subSet = submitted.map(key).sort();
-    const expSet = expected.map(key).sort();
-    if (JSON.stringify(subSet) !== JSON.stringify(expSet)) offending.push(gk);
+    const have = {};
+    submitted.forEach(function (m) { have[key(m)] = true; });
+    const torn = submitted.some(function (m) {
+      const unit = expandUnit(model, config, { name: m.name, row: m.row, fromIdx: m.fromIdx, toIdx: m.toIdx }) || [];
+      return unit.some(function (u) { return !have[key(u)]; });
+    });
+    if (torn) offending.push(gk);
   });
   return offending;
 }
