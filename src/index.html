@@ -1921,19 +1921,21 @@ function teachersInGrid() {
 }
 // 현재 탭 그리드에 실제로 존재하는 무반 과목만 표시.
 // (설정에만 있고 이 탭에 없는 과목은 숨기되 DRAFT에는 남아 저장 시 보존됨)
+// RA 감독 값(RA / RA12 / RA11B / RA01_11 / RA01_11A)은 교사 행에 배정되지만 과목이 아니므로 제외.
 function classlessCandidates() {
   var set = {};
   STATE.model.entries.forEach(function (e) {
     if (e.type !== 'teacher') return;
-    for (var i = 0; i < SLOT_COUNT; i++) { var s = e.slots[i]; if (s && !parseSubject(s)) set[s] = true; }
+    for (var i = 0; i < SLOT_COUNT; i++) { var s = e.slots[i]; if (s && !parseSubject(s) && !isRaValue(s)) set[s] = true; }
   });
   return Object.keys(set).sort();
 }
-// 설정에는 있지만 현재 탭 그리드에 없는 무반 과목 수 (안내용)
+// 설정에는 있지만 현재 탭 그리드에 없는 무반 과목 수 (안내용).
+// 과거에 잘못 저장된 RA 값 키는 세지 않는다(시트 데이터는 보존, 표시에서만 제외).
 function classlessHiddenCount() {
   var grid = {};
   classlessCandidates().forEach(function (s) { grid[s] = true; });
-  return Object.keys((DRAFT && DRAFT.classless) || {}).filter(function (s) { return !grid[s]; }).length;
+  return Object.keys((DRAFT && DRAFT.classless) || {}).filter(function (s) { return !grid[s] && !isRaValue(s); }).length;
 }
 function selectedValues(sel) {
   var out = [];

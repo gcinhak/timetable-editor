@@ -293,7 +293,21 @@ function planMovesTo(model, config, move, toIdx, opts) {
       }
     }
   }
-  ctx.plans.sort(function (a, b) { return (a.moves.length - b.moves.length) || (a.steps - b.steps); });
+  // 정렬: 이동 수 → 두 열(F↔T) 안에서만 움직이는 계획(맞교환) 우선 → 단계 수.
+  // 맞교환 우선은 방향 대칭성용: A↔B 순수 맞교환은 양방향에서 '같은 moves 집합'이므로,
+  // 동률(이동 수)에서 이를 앞세우면 기본 선택(첫 경로)이 어느 방향에서 시작해도 동일해진다.
+  // (제3의 슬롯으로 밀어내는 연쇄 후보는 방향별로 다른 것이 정당 — 뒤 순위로만 남긴다.)
+  var F = target.fromIdx, T = toIdx;
+  function isTwoCol(p) {
+    for (var i = 0; i < p.moves.length; i++) {
+      var m = p.moves[i];
+      if (!((m.fromIdx === F && m.toIdx === T) || (m.fromIdx === T && m.toIdx === F))) return 0;
+    }
+    return 1;
+  }
+  ctx.plans.sort(function (a, b) {
+    return (a.moves.length - b.moves.length) || (isTwoCol(b) - isTwoCol(a)) || (a.steps - b.steps);
+  });
   return ctx.plans;
 }
 

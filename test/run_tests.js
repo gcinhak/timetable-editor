@@ -20,7 +20,7 @@ const CORE = new Function(
   readCore('../src/core/Core_Validate.js') + '\n' +
   readCore('../src/core/Core_Recommend.js') + '\n' +
   readCore('../src/core/web_extra.js') + '\n' +
-  'return { buildModel, checkMoves, checkMovesDelta, hasBlock, parseConfig, planMoveTo, planMovesTo, planScanTo, planScanAll, planSwapTo, slotLabel, movesToCellWrites, serializeConfig, expandUnit, findConflicts, resolvePinned };'
+  'return { buildModel, checkMoves, checkMovesDelta, hasBlock, parseConfig, planMoveTo, planMovesTo, planScanTo, planScanAll, planSwapTo, slotLabel, movesToCellWrites, serializeConfig, expandUnit, findConflicts, resolvePinned, parseSubject, expandTargets };'
 )();
 const parseConfig = CORE.parseConfig;
 const CM = { buildModel: CORE.buildModel };
@@ -1662,6 +1662,76 @@ await (async function () {
   // 대체 수단: 금지 슬롯([고정블록])을 지정하면 정상 차단
   const cfgB = { fixedBlocks: [{ day: 4, period: 7, label: '자치모임', grades: [8], classes: [], partialGrades: [] }] };
   check('금지 슬롯 지정 시 7교시 이동 차단', CORE.hasBlock(CORE.checkMoves(mA, cfgB, moveA)));
+}
+
+/* =========================================================
+   RA 감독 값은 과목이 아님 — 무반 후보·미분류·과목표시 전부 제외 (회귀)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  const raVals = ['RA', 'RA12', 'RA11B', 'RA01_11', 'RA02_12', 'RA01_11A'];
+
+  // (1) core expandTargets/findConflicts: RA 값은 미분류도, 학급 점유도 아님
+  raVals.forEach((v) => {
+    const tg = CORE.expandTargets(v, {});
+    check(`'${v}' expandTargets 비과목(미분류·파싱·학급 전부 아님)`,
+      !tg.unclassified && !tg.parsed && tg.classes.length === 0);
+    check(`'${v}' findConflicts 충돌 없음`,
+      CORE.findConflicts(CORE.buildModel([dataRow('T', { 0: v })], 3), {}).length === 0);
+  });
+  const raClsModel = CORE.buildModel([dataRow('T1', { 0: 'RA01_11A' }), dataRow('T2', { 0: 'Eng11A' })], 3);
+  check('RA01_11A ↔ Eng11A 같은 슬롯 학급 중복 아님',
+    !CORE.findConflicts(raClsModel, {}).some((c) => c.type === 'class'));
+  check('JMA 는 여전히 미분류',
+    CORE.findConflicts(CORE.buildModel([dataRow('T', { 0: 'JMA' })], 3), {}).some((c) => c.type === 'unclassified'));
+
+  // (2) index.html classlessCandidates/classlessHiddenCount: RA 값 제외, 일반 무반 과목 유지
+  const html = readFileSync(join(__dir, '../src/index.html'), 'utf8');
+  const clSrc = fnSrc(html, 'classlessCandidates') + '\n' + fnSrc(html, 'classlessHiddenCount');
+  const runCl = new Function('STATE', 'DRAFT', 'SLOT_COUNT', 'parseSubject', 'isRaValue',
+    clSrc + '\nreturn { cands: classlessCandidates(), hidden: classlessHiddenCount() };');
+  const clModel = CORE.buildModel(
+    [dataRow('T', { 0: 'RA01_11', 1: 'RA02_12', 2: 'RA01_11A', 3: 'RA12', 4: 'RA11B', 5: 'JMA', 6: 'Eng9C' })], 3);
+  const clOut = runCl({ model: clModel }, { classless: { 'RA01_11': ['11전체'], '다른탭과목': ['7전체'] } },
+    40, CORE.parseSubject, isRaValue);
+  check('classlessCandidates: RA 값 전부 제외 + JMA 만 후보', eq(clOut.cands, ['JMA']));
+  check('classlessHiddenCount: 저장된 RA 키는 세지 않음(다른탭과목 1건만)', clOut.hidden === 1);
+
+  // (3) 학년별 시간표(state.js): RA 값은 편성 과목으로 표시되지 않음
+  raVals.forEach((v) => {
+    for (const g of [11, 12]) {
+      check(`subjectGradeTargets('${v}', ${g}) === null`, subjectGradeTargets(v, g, {}) === null);
+    }
+  });
+  const giModel = CORE.buildModel([dataRow('T', { 0: 'RA01_11', 1: 'Eng11A' })], 3);
+  const gi = gradeSubjectIndex(giModel, { classless: {} }, 11);
+  check('gradeSubjectIndex: RA01_11 미표시·Eng11A 표시', eq(gi[0], []) && eq(gi[1], ['Eng11A']));
+}
+
+/* =========================================================
+   같은 교사 두 수업 맞교환 — 방향 대칭 (회귀)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  // 같은 교사의 다른 학년 두 수업(사용자 사례 구조: Eng9C 월1 ↔ Eng12B 월2).
+  // 어느 방향에서 시작해도 첫 계획(기본 선택)은 같은 순수 맞교환 moves 집합이어야 한다.
+  const m = CORE.buildModel([dataRow('T', { 0: 'Eng9C', 1: 'Eng12B' })], 3);
+  const A = CORE.planMovesTo(m, {}, { name: 'T', row: 3, fromIdx: 1 }, 0); // Eng12B 월2→월1
+  const B = CORE.planMovesTo(m, {}, { name: 'T', row: 3, fromIdx: 0 }, 1); // Eng9C 월1→월2
+  const sig = (pl) => pl.moves.map((mm) => mm.row + ':' + mm.fromIdx + '>' + mm.toIdx).sort().join('|');
+  const swapSig = ['3:0>1', '3:1>0'].sort().join('|');
+  check('양방향 복수 계획 존재(연쇄 후보 포함)', A.length > 1 && B.length > 1);
+  check('A 방향(Eng12B 월2→월1) 첫 계획 = 순수 맞교환', sig(A[0]) === swapSig);
+  check('B 방향(Eng9C 월1→월2) 첫 계획 = 순수 맞교환', sig(B[0]) === swapSig);
+  check('양방향 첫 계획 moves 집합 동일', sig(A[0]) === sig(B[0]));
 }
 
 /* =========================================================

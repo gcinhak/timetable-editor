@@ -51,8 +51,12 @@ function expandTargets(subject, config) {
   byConfig.set(key, res);
   return res;
 }
+// RA 감독 값 판정 — 웹 state.js RA_VALUE_RE 의 미러(캡처만 제거). 형식이 바뀌면 반드시 함께 수정.
+// 'RA' / 'RA'+학년[+반](legacy: RA12, RA11B) / 'RA'+순번2자리+'_'+학년[+반](신형: RA01_11, RA01_11A).
+var CV_RA_VALUE_RE = /^RA(?:\d{2,}_(?:7|8|9|10|11|12)[A-C]?|(?:7|8|9|10|11|12)[A-C]?)?$/;
 function expandTargetsUncached(subject, config) {
-  if (/^RA(?:\d{2,}_)?(?:7|8|9|10|11|12)?$/.test(String(subject).trim())) return { classes: [], parsed: false, mapped: false, unclassified: false, partialGrades: [] };
+  // RA 값은 과목이 아니다 — 반 지정형(RA11B, RA01_11A)이 parseSubject 에 오파싱되기 전에 먼저 걸러낸다.
+  if (CV_RA_VALUE_RE.test(String(subject).trim())) return { classes: [], parsed: false, mapped: false, unclassified: false, partialGrades: [] };
   var p = _parseSubject(subject);
   if (p) return { classes: [{ grade: p.grade, cls: p.cls }], parsed: true, mapped: false, unclassified: false, partialGrades: [] };
   var classless = (config && config.classless) || {};
