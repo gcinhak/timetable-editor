@@ -1735,6 +1735,35 @@ await (async function () {
 }
 
 /* =========================================================
+   이동계획 열거 — 얕은 해 우선(IDDFS)·방향별 후보 개수 대칭 (회귀)
+   ========================================================= */
+{
+  function dataRow(name, slotMap) {
+    const r = [name, ''];
+    for (let i = 0; i < 40; i++) r.push(slotMap[i] || '');
+    return r;
+  }
+  // T: Eng12B@0, Eng9C@1. U: Kor9C@2 → Eng9C 를 2로 미는 분기만 재배치가 더 필요한 깊은
+  // 가지(2 이후의 3,4,... 는 전부 빈 슬롯 2이동 연쇄). 종전 단일 깊이 DFS 는 목적지 2의
+  // 깊은 가지에서 maxPlans 를 먼저 채워 2이동 해를 통째로 놓쳤다(방향별 개수·최소 이동 비대칭).
+  const m = CORE.buildModel([
+    dataRow('T', { 0: 'Eng12B', 1: 'Eng9C' }),
+    dataRow('U', { 2: 'Kor9C' }),
+  ], 3);
+  const A = CORE.planMovesTo(m, {}, { name: 'T', row: 3, fromIdx: 0 }, 1); // Eng12B 0→1
+  const B = CORE.planMovesTo(m, {}, { name: 'T', row: 3, fromIdx: 1 }, 0); // Eng9C 1→0
+  const sig = (pl) => pl.moves.map((mm) => mm.row + ':' + mm.fromIdx + '>' + mm.toIdx).sort().join('|');
+  const swapSig = ['3:0>1', '3:1>0'].sort().join('|');
+  check('양방향 후보 개수 동일', A.length === B.length);
+  check('IDDFS A 첫 계획 = 순수 맞교환', sig(A[0]) === swapSig);
+  check('IDDFS B 첫 계획 = 순수 맞교환', sig(B[0]) === swapSig);
+  check('A 방향 전 계획 최소 2이동(깊은 가지에 가려지지 않음)', A.every((p) => p.moves.length === 2));
+  check('B 방향 전 계획 최소 2이동', B.every((p) => p.moves.length === 2));
+  check('A 방향에 제3슬롯 2이동 연쇄 포함(Eng9C→3)',
+    A.some((p) => sig(p) === ['3:0>1', '3:1>3'].sort().join('|')));
+}
+
+/* =========================================================
    assembleConfig(index.html) — 설정 저장 시 regularSlots 보존
    ========================================================= */
 {

@@ -222,11 +222,16 @@ function pmtDests(model, occ, moves, emptyOnly) {
 }
 
 // DFS: 이동집합이 원본 대비 무충돌이면 기록, 아니면 참여 점유 수업을 후보지로 relo 후 재귀.
-function pmtSearch(model, config, moves, steps, depthLeft, ctx) {
+// 노드 회계: '생성된 이동집합당 checkMovesDelta 1회 = 1노드'(종전과 동일 총량). 부모가 자식들의
+//   delta 를 미리 계산해 '신규 충돌 적은 순'으로 내려간다(greedy 유도) — 넓은 트리에서 존재하는
+//   해를 예산(NODE_CAP) 안에 찾을 확률을 크게 높인다. delta 는 재귀로 전달해 이중 계산이 없다.
+function pmtSearch(model, config, moves, steps, depthLeft, ctx, delta) {
   if (ctx.plans.length >= ctx.maxPlans) return;
-  if (ctx.nodes >= ctx.nodeCap) return;
-  ctx.nodes++;
-  var delta = _checkMovesDelta(model, config, moves); // 항상 원본 모델 기준
+  if (delta == null) { // 루트 호출만 여기서 계산(자식은 부모가 계산해 전달)
+    if (ctx.nodes >= ctx.nodeCap) return;
+    ctx.nodes++;
+    delta = _checkMovesDelta(model, config, moves); // 항상 원본 모델 기준
+  }
   if (delta.blocks.length === 0) {
     var s = pmtSig(moves);
     if (!ctx.seen[s]) {
@@ -236,17 +241,33 @@ function pmtSearch(model, config, moves, steps, depthLeft, ctx) {
     return;
   }
   if (depthLeft <= 0) return;
+  // 해소 불가 가지 파기: fixed/unavailable/pinned 충돌은 이동집합의 어떤 이동이 그 슬롯에
+  //   들어가서 생긴 것이고, pmtMerge 가 같은 (행,열) 이동의 철회·변경을 금지하므로 어떤
+  //   후속 재배치로도 사라지지 않는다 → 즉시 가지 파기(planSwapTo 의 동일 규칙과 일치).
+  //   실측: 고정블록·pinned 슬롯으로의 재배치 가지가 NODE_CAP 예산을 통째로 태우던 낭비 제거.
+  for (var b = 0; b < delta.blocks.length; b++) {
+    var bt = delta.blocks[b].type;
+    if (bt === 'fixed' || bt === 'unavailable' || bt === 'pinned') return;
+  }
   var occs = pmtOccupants(model, config, moves, delta.blocks);
+  var kids = [];
   for (var i = 0; i < occs.length; i++) {
     var occ = occs[i];
     var dests = pmtDests(model, occ, moves, ctx.emptyOnly);
     for (var d = 0; d < dests.length; d++) {
-      if (ctx.plans.length >= ctx.maxPlans || ctx.nodes >= ctx.nodeCap) return;
+      if (ctx.plans.length >= ctx.maxPlans || ctx.nodes >= ctx.nodeCap) break;
       var relo = _expandUnit(model, config, { name: occ.name, row: occ.row, fromIdx: occ.idx, toIdx: dests[d] });
       var next = pmtMerge(moves, relo);
       if (!next) continue;
-      pmtSearch(model, config, next, steps + 1, depthLeft - 1, ctx);
+      ctx.nodes++;
+      var nd = _checkMovesDelta(model, config, next);
+      kids.push({ moves: next, delta: nd, nb: nd.blocks.length, ord: kids.length });
     }
+  }
+  kids.sort(function (a, b2) { return (a.nb - b2.nb) || (a.ord - b2.ord); }); // ord: 엔진 무관 결정성
+  for (var k = 0; k < kids.length; k++) {
+    if (ctx.plans.length >= ctx.maxPlans) return;
+    pmtSearch(model, config, kids[k].moves, steps + 1, depthLeft - 1, ctx, kids[k].delta);
   }
 }
 
@@ -263,37 +284,37 @@ function planMovesTo(model, config, move, toIdx, opts) {
   if (toIdx === target.fromIdx) return [];
   var placeMoves = _expandUnit(model, config, { name: target.name, row: target.row, fromIdx: target.fromIdx, toIdx: toIdx });
   var ctx = { nodes: 0, nodeCap: nodeCap, maxPlans: maxPlans, plans: [], seen: {}, targetSig: pmtSig(placeMoves), emptyOnly: !!opts.emptyOnly };
-  // 1차 패스: 빈슬롯 전용(경량) 탐색을 먼저 완주. 경량 스캔(planScanTo/All)과 '같은 깊이(SCAN_DEPTH)·
-  //   같은 emptyOnly·같은 DFS 순서'로, 단 '더 큰 예산(nodeCap)'으로 탐색하므로, 스캔이 찾는 모든 해를
-  //   여기서 반드시 먼저 발견 → "스캔 hit ⟹ planMovesTo 해 존재" 부분집합 하드 불변식을 예산과
-  //   무관하게 보장(스왑 유도 분기의 예산 소진으로 해를 놓치던 문제 제거).
-  //   (opts.emptyOnly 이면 스캔 자신의 호출 — 1차 패스만 수행하고 스왑 패스는 생략.)
+  // 1·2차 패스는 '깊이 반복 심화(IDDFS)'로 얕은 해(적은 이동)를 먼저 수확한다.
+  //   단일 깊이 DFS 는 앞 목적지의 깊은 가지에서 maxPlans 를 먼저 채워, 뒤 목적지의 더 얕은 해
+  //   (2이동 연쇄 등)를 통째로 놓치는 순서 아티팩트가 있었다 — 같은 두 수업의 맞교환인데
+  //   방향에 따라 후보 목록·최소 이동 수가 달라지던 비대칭의 원인.
+  //   seen 이 반복 간 중복 기록을 막고, 발견 순서는 steps 비내림차순이 된다.
+  // 1차 패스: 빈슬롯 전용(경량) 탐색, 깊이 1..SCAN_DEPTH. 마지막 반복(d=SCAN_DEPTH)은 경량
+  //   스캔(planScanTo/All)과 '같은 깊이·같은 emptyOnly·같은 DFS 순서'의 완전 탐색이고, 사전
+  //   반복(d<SCAN_DEPTH)은 예산 일부(nodeCap/4씩)만 쓰도록 상한을 걸어 마지막 반복이 항상
+  //   nodeCap/2 이상(≥ 스캔 예산 SCAN_SLOT_CAP)을 확보한다 → 스캔이 찾는 해를 여기서 반드시
+  //   발견하거나 그 전에 이미 다른 해를 찾으므로 "스캔 hit ⟹ planMovesTo 해 존재" 부분집합
+  //   하드 불변식이 예산과 무관하게 유지된다.
+  //   (opts.emptyOnly 이면 스캔 자신의 호출 — 종전대로 단일 패스만 수행하고 스왑 패스는 생략.)
   if (!ctx.emptyOnly) {
     ctx.emptyOnly = true;
-    // 1차 패스 깊이는 스캔과 '동일한' SCAN_DEPTH 여야 한다. 더 깊게(maxDepth) 탐색하면 DFS 가
-    // 스캔이 찾는 해 이전에 더 깊은 분기를 먼저 소진해 순서가 어긋난다(같은 깊이라야 동일 순서·부분집합).
-    pmtSearch(model, config, placeMoves, 1, Math.min(SCAN_DEPTH, maxDepth), ctx);
-    ctx.emptyOnly = false;
-  }
-  // 2차 패스: 스왑 유도 포함 전체 탐색(빈슬롯 해는 seen 으로 중복 제거, 스왑 유도 해만 추가).
-  pmtSearch(model, config, placeMoves, 1, maxDepth, ctx);
-  // 3차 패스: 두 열 맞교환(Kempe). planScanAll 과 동일한 결정적 planSwapTo 를 호출 → 부분집합 불변식 보장.
-  //   emptyOnly(스캔 자기호출)일 때는 생략(스캔의 swap 은 planScanAll 이 직접 수행).
-  if (!opts.emptyOnly) {
-    var sw = planSwapTo(model, config, target, toIdx);
-    if (sw) {
-      var ssig = pmtSig(sw.moves);
-      if (!ctx.seen[ssig]) {
-        ctx.seen[ssig] = true;
-        // 상한 도달 시: maxPlans>1(열거)이면 최악 경로를 swap 으로 교체(최소 1개 포함 보장).
-        // maxPlans===1(planMoveTo/단일 최선)이면 기존 direct/chain 을 swap 으로 덮지 않음(단일 최선 의미 보존).
-        // 단, 다른 해가 하나도 없으면(빈 plans) swap 이 유일 해이므로 항상 push.
-        if (ctx.plans.length >= maxPlans) { if (maxPlans > 1) ctx.plans[maxPlans - 1] = sw; }
-        else ctx.plans.push(sw);
-      }
+    var lastD = Math.min(SCAN_DEPTH, maxDepth);
+    for (var d1 = 1; d1 <= lastD; d1++) {
+      ctx.nodeCap = (d1 < lastD) ? Math.min(nodeCap, ctx.nodes + (nodeCap >> 2)) : nodeCap;
+      pmtSearch(model, config, placeMoves, 1, d1, ctx);
     }
+    ctx.nodeCap = nodeCap;
+    ctx.emptyOnly = false;
+    // 2차 패스: 스왑 유도 포함 전체 탐색, 깊이 1..maxDepth 반복 심화(빈슬롯 해는 seen 으로
+    //   중복 제거, 스왑 유도 해만 추가). 순수 A↔B 맞교환형 해(2이동)가 깊은 연쇄보다 먼저 잡힌다.
+    for (var d2 = 1; d2 <= maxDepth; d2++) pmtSearch(model, config, placeMoves, 1, d2, ctx);
+  } else {
+    // 스캔 자기호출(planScanTo/planScanAll): 종전과 동일한 단일 패스 — 경량 스캔의 탐색 순서·
+    //   예산 의미를 바꾸지 않는다.
+    pmtSearch(model, config, placeMoves, 1, maxDepth, ctx);
   }
-  // 정렬: 이동 수 → 두 열(F↔T) 안에서만 움직이는 계획(맞교환) 우선 → 단계 수.
+  // 정렬 기준(아래 3차 패스의 '최악 경로' 판정에도 사용):
+  //   이동 수 → 두 열(F↔T) 안에서만 움직이는 계획(맞교환) 우선 → 단계 수.
   // 맞교환 우선은 방향 대칭성용: A↔B 순수 맞교환은 양방향에서 '같은 moves 집합'이므로,
   // 동률(이동 수)에서 이를 앞세우면 기본 선택(첫 경로)이 어느 방향에서 시작해도 동일해진다.
   // (제3의 슬롯으로 밀어내는 연쇄 후보는 방향별로 다른 것이 정당 — 뒤 순위로만 남긴다.)
@@ -305,9 +326,32 @@ function planMovesTo(model, config, move, toIdx, opts) {
     }
     return 1;
   }
-  ctx.plans.sort(function (a, b) {
-    return (a.moves.length - b.moves.length) || (isTwoCol(b) - isTwoCol(a)) || (a.steps - b.steps);
-  });
+  function cmpPlan(a, b2) {
+    return (a.moves.length - b2.moves.length) || (isTwoCol(b2) - isTwoCol(a)) || (a.steps - b2.steps);
+  }
+  // 3차 패스: 두 열 맞교환(Kempe). planScanAll 과 동일한 결정적 planSwapTo 를 호출 → 부분집합 불변식 보장.
+  //   emptyOnly(스캔 자기호출)일 때는 생략(스캔의 swap 은 planScanAll 이 직접 수행).
+  if (!opts.emptyOnly) {
+    var sw = planSwapTo(model, config, target, toIdx);
+    if (sw) {
+      var ssig = pmtSig(sw.moves);
+      if (!ctx.seen[ssig]) {
+        ctx.seen[ssig] = true;
+        // 상한 도달 시: maxPlans>1(열거)이면 최악 경로(cmpPlan 기준)를 swap 으로 교체(최소 1개 포함 보장).
+        //   (IDDFS 패스 구조상 마지막 발견이 최악이라는 보장이 없어 실제 최악을 골라 교체한다.)
+        // maxPlans===1(planMoveTo/단일 최선)이면 기존 direct/chain 을 swap 으로 덮지 않음(단일 최선 의미 보존).
+        // 단, 다른 해가 하나도 없으면(빈 plans) swap 이 유일 해이므로 항상 push.
+        if (ctx.plans.length >= maxPlans) {
+          if (maxPlans > 1) {
+            var wi = 0;
+            for (var pi = 1; pi < ctx.plans.length; pi++) if (cmpPlan(ctx.plans[pi], ctx.plans[wi]) >= 0) wi = pi;
+            ctx.plans[wi] = sw;
+          }
+        } else ctx.plans.push(sw);
+      }
+    }
+  }
+  ctx.plans.sort(cmpPlan);
   return ctx.plans;
 }
 
