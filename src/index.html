@@ -142,6 +142,10 @@
   /* 같은 요일에 동일 과목 2회 이상 배치된 슬롯 (보라 틴트) */
   table.grid td.dup-day { background: #ecdff7; }
 
+  /* 미확정(스테이징) 변경 셀 — 청록 + 점선. 아래 hl-*(선택 파랑·후보·프리뷰 주황)가
+     같은 셀에 붙으면 나중 규칙이 이겨 이동 계획 표시가 우선한다 */
+  td.staged-cell { background: #c9ece7 !important; outline: 2px dashed #1f9188; outline-offset: -2px; }
+
   /* 하이라이트 4색 */
   td.hl-green { background: #b6d7a8 !important; cursor: pointer; }
   td.hl-yellow { background: #ffe599 !important; cursor: pointer; }
@@ -189,6 +193,10 @@
   #panel .btns { display: flex; gap: 10px; margin-left: auto; align-items: center; }
   #panel .btns button { font-size: 13px; padding: 7px 18px; border-radius: 5px; cursor: pointer; border: 1px solid #bbb; }
   #stagedNote { font-size: 12px; font-weight: 600; color: #b3261e; }
+  #stagedNote .staged-sw {
+    display: inline-block; width: 9px; height: 9px; background: #c9ece7;
+    outline: 2px dashed #1f9188; outline-offset: -1px; margin: 0 8px 0 3px; vertical-align: -1px;
+  }
   #btnChange { background: #2f5fa8; color: #fff; border-color: #2f5fa8; }
   #btnChange:disabled { background: #aab7ca; border-color: #aab7ca; cursor: default; }
   #btnConfirm { background: #2f5fa8; color: #fff; border-color: #2f5fa8; }
@@ -1410,6 +1418,17 @@ function renderGrid() {
     html += '<th class="slot-h' + bcls + '" data-idx="' + i + '" title="' + ttl + '">' + slotLabel(i) + mark + '</th>';
   }
   html += '</tr></thead><tbody>';
+  // 스테이징으로 값이 바뀐 셀(비워진 원래 자리 + 새로 채워진 자리) — 서버 원본과의 diff
+  var stagedSet = {};
+  if (hasStaged() && STATE.stagedBase) {
+    STATE.model.entries.forEach(function (e) {
+      var base = STATE.stagedBase.grid[e.row - 1] || [];
+      var cur = STATE.grid[e.row - 1] || [];
+      for (var si = 0; si < SLOT_COUNT; si++) {
+        if ((base[2 + si] || '') !== (cur[2 + si] || '')) stagedSet[cellKey(e.row, si)] = true;
+      }
+    });
+  }
   var deptSet = deptBoundaryRows(STATE.model.entries, STATE.depts);
   var headSet = {};
   ((STATE.depts && STATE.depts.heads) || []).forEach(function (nm) { headSet[nm] = true; });
@@ -1451,6 +1470,10 @@ function renderGrid() {
         var ps = pinnedSlotsOf(v);
         if (ps && ps.indexOf(i) !== -1) tdCls += ' pinned';
       }
+      if (stagedSet[cellKey(e.row, i)]) {
+        tdCls += ' staged-cell';
+        if (!uttl) uttl = ' title="미확정 변경 — [확정]을 눌러야 시트에 저장됩니다"';
+      }
       var cls = tdCls ? ' class="' + tdCls.trim() + '"' : '';
       // RA 행은 표시 전용 — data-erow 없이 렌더해 이동 대상(클릭)에서 제외
       var dataAttr = isTeacher ? ' data-erow="' + e.row + '" data-idx="' + i + '"' : '';
@@ -1482,10 +1505,10 @@ function fitCells() {
       var box = boxes[j];
       if (box.offsetParent === null) continue; // skip hidden (collapsed ra rows)
       var td = box.parentNode;
-      var warn = td.classList.contains('unavail-warn');
+      var warn = td.classList.contains('unavail-warn') || td.classList.contains('staged-cell');
       var size = 8;
       box.style.fontSize = '8px';
-      if (!warn) td.removeAttribute('title'); // unavail-warn 경고 타이틀 보존
+      if (!warn) td.removeAttribute('title'); // unavail-warn 경고·staged 안내 타이틀 보존
       while (size > 7 && box.scrollHeight > box.clientHeight) {
         size--;
         box.style.fontSize = size + 'px';
@@ -1643,6 +1666,25 @@ function selectTarget(erow, idx) {
   }
 }
 
+/* [취소] 후 처리: 패널을 연 채 "변경 버튼을 누르기 전 단계"로 되돌린다.
+   취소 직전 선택(sel)이 복원된 그리드에서도 같은 칸·같은 과목이면 재선택해
+   후보를 복원된 그리드 기준으로 다시 계산하고, 아니면(스테이징 폐기로 그 칸의
+   내용이 달라짐) 선택 없이 다시 고르라는 안내만 남긴다. */
+function restoreSelectionAfterCancel(sel) {
+  var entry = sel && STATE.model.entries.find(function (e) { return e.row === sel.row; });
+  var same = !!(entry && sel.subject && entry.slots[sel.fromIdx] === sel.subject && !isRaValue(sel.subject));
+  var el = document.getElementById('planPaths');
+  if (same) {
+    selectTarget(sel.row, sel.fromIdx);   // clearSelection 포함 — 후보 재계산
+    if (el) el.innerHTML = '<div class="paths-head">이동할 곳(초록·노랑 칸)을 선택하세요</div>';
+  } else {
+    if (el) el.innerHTML = '<div class="paths-head">이동할 수업을 선택하세요</div>';
+    if (sel) setGroupHint('취소로 그리드가 되돌아가 선택이 해제되었습니다 — 수업을 다시 선택하세요');
+  }
+  show('panel', true);
+  setPanelCollapsed(false);
+}
+
 // 이동 세그먼트 문자열: `${subject} ${slotLabel(from)}→${slotLabel(to)}` (subject는 esc)
 function planMoveSegs(plan) {
   return plan.moves.map(function (mv) {
@@ -1740,7 +1782,12 @@ function applyServerState(data) {
 function updateStagingUi() {
   var n = (STATE.staged || []).length;
   var note = document.getElementById('stagedNote');
-  if (note) note.textContent = n ? ('미확정 변경 ' + n + '건') : '';
+  if (note) {
+    // 색 견본(범례): 그리드의 청록 점선 칸 = 미확정 변경
+    note.innerHTML = n
+      ? '<i class="staged-sw" title="그리드에서 이 색 칸이 미확정 변경입니다"></i>미확정 변경 ' + n + '건'
+      : '';
+  }
   var bChange = document.getElementById('btnChange');
   if (bChange) bChange.disabled = !STATE.plan;
   var bConfirm = document.getElementById('btnConfirm');
@@ -1766,7 +1813,7 @@ function updateStagingUi() {
  * 테스트가 이 구간을 통째로 추출한다 — DOM·네트워크는 주입 가능한 함수
  * (renderGrid/renderGradeFreeIfOpen/updateUndoButton/updateStagingUi/toast/
  *  show/alert/confirm/apiCall/loadState/failText/applyServerState/clearSelection/
- *  handleErr/buildModel/movesToCellWrites/undoSummaryOf)에만 위임한다. */
+ *  restoreSelectionAfterCancel/handleErr/buildModel/movesToCellWrites/undoSummaryOf)에만 위임한다. */
 function hasStaged() { return !!(STATE.staged && STATE.staged.length); }
 
 // 이동(moves)을 현재 로컬 그리드에 반영한 새 그리드. 셀 좌표는 서버와 동일:
@@ -1830,16 +1877,26 @@ function confirmDiscardStaged(actionMsg) {
   return true;
 }
 
-// [취소] — 스테이징 전부 폐기·복원. 스테이징이 없으면 계획 선택만 해제.
+// [취소] — 스테이징 전부 폐기·복원. 확인 대화상자 없이 즉시 동작하고(사후 토스트로 안내),
+// 패널은 유지한 채 취소 직전 선택을 복원한다(restoreSelectionAfterCancel).
+// Ctrl+Z 로 한 건씩 되돌리는 대신 전부를 즉시 버리는 동작임에 유의(되돌릴 수 없다).
+// 스테이징이 없으면 기존대로 계획 선택만 해제한다.
 function cancelChanges() {
   if (hasStaged()) {
-    if (!confirm('미확정 변경 ' + STATE.staged.length + '건을 모두 버리고 원래대로 되돌릴까요?')) return;
+    var n = STATE.staged.length;
+    var sel = null;
+    if (STATE.target) {   // renderGrid(clearSelection) 전에 선택을 보존
+      var se = STATE.model.entries.find(function (e) { return e.row === STATE.target.row; });
+      sel = { row: STATE.target.row, fromIdx: STATE.target.fromIdx,
+              subject: se ? se.slots[STATE.target.fromIdx] : '' };
+    }
     discardStaged();
     renderGrid();
     renderGradeFreeIfOpen();
     updateUndoButton();
     updateStagingUi();
-    toast('미확정 변경을 모두 취소했습니다');
+    restoreSelectionAfterCancel(sel);
+    toast('변경 ' + n + '건을 취소했습니다');
     return;
   }
   clearSelection();

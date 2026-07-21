@@ -3653,7 +3653,7 @@ await (async function () {
 
   const build = function (opts) {
     const o = opts || {};
-    const env = { renders: 0, toasts: [], alerts: [], confirms: [], applyCalls: [], serverApplied: [] };
+    const env = { renders: 0, toasts: [], alerts: [], confirms: [], applyCalls: [], serverApplied: [], restores: [], clearSels: 0 };
     const STATE = {
       sheetId: 'S', tab: 'revised', dataStart: 3, version: 'v0',
       grid: mkGrid(), model: null, plan: null, target: null, plans: null, planTo: null,
@@ -3664,19 +3664,21 @@ await (async function () {
       'STATE', 'buildModel', 'movesToCellWrites', 'undoSummaryOf',
       'renderGrid', 'renderGradeFreeIfOpen', 'updateUndoButton', 'updateStagingUi',
       'toast', 'show', 'alert', 'confirm', 'apiCall', 'failText',
-      'applyServerState', 'clearSelection', 'handleErr',
+      'applyServerState', 'clearSelection', 'restoreSelectionAfterCancel', 'handleErr',
       src + '\nreturn { hasStaged, stageChange, undoStagedChange, discardStaged, confirmDiscardStaged, cancelChanges, commitStaged, stagedNextGrid };'
     )(
       STATE, CORE.buildModel, CORE.movesToCellWrites,
       function (moves) { return 'sum' + moves.length; },
-      function () { env.renders++; }, function () {}, function () {}, function () {},
+      function () { env.renders++; STATE.plan = null; STATE.target = null; }, // renderGrid 는 clearSelection 포함
+      function () {}, function () {}, function () {},
       function (m) { env.toasts.push(m); }, function () {},
       function (m) { env.alerts.push(m); },
       function (m) { env.confirms.push(m); return o.confirmYes !== false; },
       o.apiCall || function () { throw new Error('no apiCall'); },
       function (r) { return String((r.data && r.data.error) || r.status); },
       function (data) { env.serverApplied.push(data); },
-      function () { STATE.plan = null; STATE.target = null; },
+      function () { env.clearSels++; STATE.plan = null; STATE.target = null; },
+      function (sel) { env.restores.push(sel); },
       function () {}
     );
     api.env = env;
@@ -3717,18 +3719,27 @@ await (async function () {
   check('스테이징 undo: 전부 되돌리면 원본 복귀', h.STATE.staged.length === 0
     && h.STATE.grid === g0 && h.STATE.stagedBase === null);
 
-  // (4) [취소] — 전부 폐기하고 서버 원본 복원
+  // (4) [취소] — confirm 없이 즉시 전부 폐기·복원, 패널 유지(선택 복원 위임) + 사후 토스트
   h = build({});
   const g1 = h.STATE.grid;
   stage2(h);
+  h.STATE.target = { name: 'T1', row: 3, fromIdx: 3 };   // 취소 직전 선택(스테이징 반영본 기준)
   h.cancelChanges();
-  check('[취소] 확인 대화상자', h.env.confirms.length === 1 && /미확정 변경 2건/.test(h.env.confirms[0]));
+  check('[취소] confirm 없이 즉시 동작', h.env.confirms.length === 0);
   check('[취소] 원본 그리드·모델 복원', h.STATE.grid === g1 && h.STATE.model.entries[0].slots[0] === 'Kor10A');
   check('[취소] 스테이징 비움', h.STATE.staged.length === 0 && h.STATE.stagedBase === null);
-  h = build({ confirmYes: false });
+  check('[취소] 사후 토스트(N건 취소)', h.env.toasts.some(function (t) { return /변경 2건을 취소했습니다/.test(t); }));
+  check('[취소] 패널 유지·선택 복원 호출(취소 직전 선택 전달)', h.env.restores.length === 1
+    && h.env.restores[0] && h.env.restores[0].row === 3 && h.env.restores[0].fromIdx === 3
+    && h.env.restores[0].subject === 'Kor10A');
+  h = build({});
   stage2(h);
-  h.cancelChanges();
-  check('[취소] 거부 시 스테이징 유지', h.STATE.staged.length === 2);
+  h.cancelChanges();   // 선택 없이 취소 — 복원 훅은 sel=null 로 호출된다
+  check('[취소] 선택 없던 경우 sel=null 전달', h.env.restores.length === 1 && h.env.restores[0] === null);
+  h = build({});
+  h.cancelChanges();   // 스테이징 0건 → 기존대로 선택 해제만
+  check('[취소] 스테이징 0건: 선택 해제만(토스트·복원 없음)',
+    h.env.clearSels === 1 && h.env.restores.length === 0 && h.env.toasts.length === 0);
 
   // (5) [확정] — 한 건씩 순서대로 재생, baseVersion 체이닝, undo 스택 적재
   const okApi = function (env) {
@@ -3843,6 +3854,27 @@ await (async function () {
   check('beforeunload 미저장 경고', /beforeunload[\s\S]{0,120}?hasUnsavedWork\(\)/.test(html));
   check('onState 가 스테이징을 초기화', /STATE\.staged = \[\]; STATE\.stagedBase = null;   \/\/ 서버 최신 상태가 기준/.test(html));
   check('clearSelection 이 스테이징 중 패널 유지', /show\('panel', hasStaged\(\)\)/.test(html));
+
+  // (10) 스테이징 셀 하이라이트·취소 UX(소스 검사)
+  const cancelSrc = html.slice(html.indexOf('function cancelChanges'), html.indexOf('// [확정]'));
+  check('[취소] 소스에 confirm 호출 없음', cancelSrc.indexOf('confirm(') === -1);
+  check('[취소] 가 restoreSelectionAfterCancel 로 패널·선택 복원', /restoreSelectionAfterCancel\(sel\)/.test(cancelSrc));
+  const restoreSrc = html.slice(html.indexOf('function restoreSelectionAfterCancel'), html.indexOf('// 이동 세그먼트 문자열'));
+  check('복원 훅: 패널을 열린 채 유지', /show\('panel', true\)/.test(restoreSrc));
+  check('복원 훅: 같은 칸·같은 과목이면 재선택(후보 재계산)', /selectTarget\(sel\.row, sel\.fromIdx\)/.test(restoreSrc));
+  check('staged-cell CSS 존재·hl-* 보다 앞(선택/프리뷰 색 우선)',
+    /td\.staged-cell \{ background: #c9ece7 !important/.test(html)
+    && html.indexOf('td.staged-cell {') < html.indexOf('td.hl-green {'));
+  const rgSrc = html.slice(html.indexOf('function renderGrid'), html.indexOf('function fitCells'));
+  check('renderGrid: 서버 원본과의 diff 로 staged 셀 표시',
+    /hasStaged\(\) && STATE\.stagedBase/.test(rgSrc) && /stagedSet\[cellKey\(e\.row, i\)\]/.test(rgSrc)
+    && /staged-cell/.test(rgSrc));
+  check('staged 셀 툴팁 안내', /미확정 변경 — \[확정\]을 눌러야 시트에 저장됩니다/.test(rgSrc));
+  check('패널 범례 색 견본(staged-sw)', /staged-sw/.test(html) && /#stagedNote \.staged-sw/.test(html));
+  check('다른 폐기 경로 confirm 유지(confirmDiscardStaged·logout)',
+    /function confirmDiscardStaged\(actionMsg\) \{\n  if \(!hasStaged\(\)\) return true;\n  if \(!confirm\(/.test(html)
+    && /hasUnsavedWork\(\) && !confirm\('저장하지 않은 변경이 있습니다\. 로그아웃할까요\?'\)/.test(html));
+  check('Esc: 선택 해제만(clearSelection) 유지', /if \(ev\.key !== 'Escape'\) return;[\s\S]{0,200}?clearSelection\(\);/.test(html));
 })();
 
 console.log('');
