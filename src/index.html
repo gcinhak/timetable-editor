@@ -2609,12 +2609,12 @@ function gradeFreeModeHtml() {
 }
 function gradeFreeLegendHtml() {
   var items = [
-    ['sw-all', '학년 전체 공강'],
-    ['sw-some', '일부 반 공강'],
-    ['sw-part', '학년 일부 공강'],
+    ['sw-all', '학년 전체 공강 — 배경색만(텍스트 없음, 상세는 툴팁)'],
+    ['sw-some', '일부 반 공강 — 공강 반 이름 표시'],
+    ['sw-part', '학년 일부 공강 — 배경색만(텍스트 없음, 상세는 툴팁)'],
     ['sw-busy', '수업 있음'],
     ['sw-named', '이름 있는 금지 슬롯 — 회색 + 실선 테두리 + 이름(예: CHAPEL)'],
-    ['sw-nogo', '이름 없는 금지 슬롯 — 사선 무늬 + \'금지\''],
+    ['sw-nogo', '이름 없는 금지 슬롯 — 사선 무늬만(텍스트 없음)'],
     ['sw-pblock', '부분 금지 — 왼쪽 아래 삼각'],
     ['sw-ra', 'RA 감독 배정됨 — 앞에 ✓ (배정은 메인 그리드에서)'],
     ['sw-subj', '점선 아래 작은 글씨 = 이 학년에 편성된 과목(최대 ' + GF_SUBJ_MAX + '개, 나머지는 +N·툴팁)']
@@ -2665,16 +2665,26 @@ function gradeFreeCellHtml(g, dd, p, cfg, blocks, paint, subjects) {
   else if (bst === '일부') cls += ' gf-pblock';
   if (r.covered) cls += ' gf-ra';
 
-  // 본문: 금지 슬롯이면 금지 표기를 우선(라벨 있으면 라벨), 아니면 공강 라벨
+  // 본문: '전체'·'N일부'·'금지' 상태 단어는 배경색·무늬로만 표시(텍스트 없음, 상세는 툴팁).
+  // 반 이름 나열(예: 11B, 11C)·RA ✓·감독명·금지 슬롯 라벨(예: Counseling)은 텍스트 유지.
   var text;
-  if (bst === '불가') text = blkLabel || '금지';
-  else if (r.kind === 'blocked') text = r.label || '금지';
-  else text = (r.covered ? '✓ ' : '') + raFreeCellLabel(r, { byClass: bd.byClass, gradeSups: bd.gradeSups }, g);
+  if (bst === '불가') text = blkLabel;                  // 라벨 없으면 사선 무늬만
+  else if (r.kind === 'blocked') text = r.label || '';  // 라벨 없으면 배경만
+  else {
+    var lbl = '';
+    if (r.kind === 'some') lbl = raFreeCellLabel(r, { byClass: bd.byClass, gradeSups: bd.gradeSups }, g);
+    else if (r.kind === 'all' && [g + 'A', g + 'B', g + 'C'].some(function (c) { return (bd.byClass[c] || []).length; }))
+      lbl = raFreeCellLabel(r, { byClass: bd.byClass, gradeSups: bd.gradeSups }, g);   // 감독 있으면 반별 나열
+    else if (r.kind === 'partial' && (bd.gradeSups || []).length) lbl = bd.gradeSups.join(',');
+    text = (r.covered ? '✓ ' : '') + lbl;
+  }
 
   // 툴팁: 상태 설명 + 이 모드에서 클릭하면 무슨 일이 일어나는지
   var t = [];
   if (r.kind === 'blocked') t.push('배정 금지(공강 아님)');
   else {
+    if (r.kind === 'all') t.push('학년 전체 공강');
+    else if (r.kind === 'partial') t.push('학년 일부 공강');
     t.push([g + 'A', g + 'B', g + 'C'].map(function (c) {
       var st = r.classes[c];
       if (st === 'free') { var _sn = bd.byClass[c]; return c + ' 공강' + (_sn.length ? ' (감독: ' + _sn.join(', ') + ')' : ''); }

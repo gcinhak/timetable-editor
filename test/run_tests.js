@@ -1106,10 +1106,30 @@ await (async function () {
   // gradeFreeCellHtml(g, dd, p, cfg, blocks, paint, subjects)
   //   cfg = 미리보기용 config(DRAFT 의 금지 슬롯을 반영) / blocks = 편집 형태 규칙
   const h = cell(7, 0, 1, {}, [], false, ['PEng7A', 'TKD7B', 'Eng7C']);
-  check('셀 렌더: 상태 줄과 과목 줄이 분리됨', h.indexOf('<div class="gf-st">') !== -1 && h.indexOf('<div class="gf-subj">') !== -1);
+  check("셀 렌더: '전체'는 텍스트 없이 배경만(상태 줄 없음)", h.indexOf('gf-st') === -1 && h.indexOf('gf-all') !== -1);
+  check('셀 렌더: 상태 줄 없는 칸은 과목만(gf-subj-only)', h.indexOf('<div class="gf-subj gf-subj-only">') !== -1);
   check('셀 렌더: 과목이 줄바꿈되도록 각각 span', h.indexOf('<span>PEng7A</span><span>TKD7B</span><span>Eng7C</span>') !== -1);
-  check('셀 렌더: 공강 상태 텍스트 유지', h.indexOf('전체') !== -1);
+  check('셀 렌더: 전체 공강 상태는 툴팁으로 유지', h.indexOf('학년 전체 공강') !== -1);
   check('셀 렌더: 과목 전체가 툴팁에도', h.indexOf('PEng7A / TKD7B / Eng7C') !== -1);
+
+  // 반 이름 나열(some)은 기존대로 텍스트 유지
+  const someCfg = { fixedBlocks: [{ day: 0, period: 1, label: '', grades: [], partialGrades: [], classes: ['7A'] }] };
+  const hSome = cell(7, 0, 1, someCfg, [], false, []);
+  check("셀 렌더: 반 이름 나열은 유지('7B, 7C')", hSome.indexOf('<div class="gf-st">') !== -1 && hSome.indexOf('7B, 7C') !== -1);
+
+  // RA 배정된 칸: ✓ + 감독명 텍스트 유지
+  function raSlots(v) { var a = []; for (var i = 0; i < 40; i++) a.push(i === 0 ? v : ''); return a; }
+  const cellRa = new Function('STATE', 'RA_VALUE_RE', 'isRaValue', 'raSupBreakdownAt', 'GF_SUBJECT_RE2', 'SLOT_COUNT', 'GF_SUBJ_MAX',
+    src + '\nreturn gradeFreeCellHtml;')(
+      { model: { entries: [
+        { type: 'teacher', name: '교사31', slots: raSlots('RA7B') },
+        { type: 'teacher', name: '교사32', slots: raSlots('RA7C') }] }, config: {} },
+      RA_VALUE_RE, isRaValue,
+      function () { return { byClass: { '7A': [], '7B': ['교사31'], '7C': ['교사32'] }, gradeSups: [], pure: [] }; },
+      /^(.+?)(7|8|9|10|11|12)([A-C])$/, 40, 4);
+  const hRa = cellRa(7, 0, 1, someCfg, [], false, []);
+  check('셀 렌더: RA 배정 ✓ + 감독명 유지',
+    hRa.indexOf('gf-ra') !== -1 && hRa.indexOf('✓') !== -1 && hRa.indexOf('교사31') !== -1 && hRa.indexOf('교사32') !== -1);
 
   // 과목 없는 칸은 과목 블록 자체가 없다(빈 점선이 남으면 안 됨)
   check('셀 렌더: 과목 없으면 과목 줄 없음', cell(7, 0, 1, {}, [], false, []).indexOf('gf-subj') === -1);
@@ -1132,12 +1152,13 @@ await (async function () {
   check('셀 렌더: 금지 슬롯도 라벨 + 과목 병기',
     hNogo.indexOf('gf-nogo') !== -1 && hNogo.indexOf('회의') !== -1 && hNogo.indexOf('<span>PEng7A</span>') !== -1);
 
-  // 이름 있는 금지 슬롯 = 회색 블록(gf-named) + 라벨 / 이름 없는 금지 슬롯 = 사선 무늬 + '금지'
+  // 이름 있는 금지 슬롯 = 회색 블록(gf-named) + 라벨 / 이름 없는 금지 슬롯 = 사선 무늬만('금지' 텍스트 없음)
   check('셀 렌더: 이름 있는 금지 슬롯은 gf-named + 라벨', hNogo.indexOf('gf-nogo gf-named') !== -1);
   const bare = [{ day: 0, period: 1, label: '', grades: [7], partialGrades: [], classes: [] }];
   const hBare = cell(7, 0, 1, { fixedBlocks: bare }, bare, false, []);
-  check('셀 렌더: 이름 없는 금지 슬롯은 사선(gf-named 없음) + 금지',
-    hBare.indexOf('gf-nogo') !== -1 && hBare.indexOf('gf-named') === -1 && hBare.indexOf('금지') !== -1);
+  check("셀 렌더: 이름 없는 금지 슬롯은 사선 무늬만(gf-named 없음, '금지' 텍스트 없음)",
+    hBare.indexOf('gf-nogo') !== -1 && hBare.indexOf('gf-named') === -1 && hBare.indexOf('gf-st') === -1);
+  check('셀 렌더: 이름 없는 금지 슬롯도 툴팁으로 상태 유지', hBare.indexOf('금지 슬롯') !== -1);
 
   // cfg 는 DRAFT 미리보기용 — 규칙이 cfg 에 반영되면 판정(kind)도 blocked 가 된다
   check('셀 렌더: cfg 의 금지 규칙이 판정에 반영됨', hNogo.indexOf('gf-blocked') !== -1);
@@ -2769,7 +2790,7 @@ await (async function () {
     /td\.gf-nogo\.gf-named \{[\s\S]*?box-shadow: inset 0 0 0 2px/.test(html));
   check('라벨 유무로 gf-named 를 나눈다',
     /cls \+= blkLabel \? ' gf-nogo gf-named' : ' gf-nogo';/.test(html));
-  check('금지 슬롯 본문은 라벨(있으면) 아니면 \'금지\'', /if \(bst === '불가'\) text = blkLabel \|\| '금지';/.test(html));
+  check('금지 슬롯 본문은 라벨만(없으면 무늬만, 텍스트 없음)', /if \(bst === '불가'\) text = blkLabel;/.test(html));
   check('부분 금지를 모서리 삼각으로 구분', /td\.gf-pblock::before \{[\s\S]*?border-style: solid/.test(html));
   check('RA 배정 셀에 ✓ 표식', /r\.covered \? '✓ ' : ''/.test(html));
   // 범례가 두 종류의 금지 슬롯을 각각 설명한다
