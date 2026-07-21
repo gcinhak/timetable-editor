@@ -1850,9 +1850,13 @@ await (async function () {
       'DEV_MODE', 'getToken', 'setToken', 'fetch', 'tokenClient', 'idClient', 'onIdCredential',
       'showReauthBanner', 'hideReauthBanner', 'timeoutMs',
       'var sheetsToken = "OLD";' + src +
-      '\nif (timeoutMs) { SHEETS_TOKEN_TIMEOUT_MS = timeoutMs; ID_TOKEN_TIMEOUT_MS = timeoutMs; }' +
+      '\nif (timeoutMs) { SHEETS_TOKEN_TIMEOUT_MS = timeoutMs; ID_TOKEN_TIMEOUT_MS = timeoutMs; GSI_READY_TIMEOUT_MS = timeoutMs; }' +
+      '\nif (tokenClient || idClient) gsiLoadState = "ready";' +   // 클라이언트를 처음부터 주입한 기존 테스트 = GSI 이미 로드됨
       '\nreturn { apiCall: apiCall, apiFetch: apiFetch, requestSheetsToken: requestSheetsToken,' +
       '  requestIdToken: requestIdToken, deliverIdToken: deliverIdToken,' +
+      '  notifyGsiLoaded: notifyGsiLoaded, notifyGsiFailed: notifyGsiFailed,' +
+      '  setTokenClient: function (c) { tokenClient = c; },' +
+      '  setIdClient: function (c) { idClient = c; },' +
       '  gen: function () { return sheetsTokenGen; }, token: function () { return sheetsToken; },' +
       '  idGen: function () { return idTokenGen; },' +
       '  setAccessAt: function (t) { sheetsTokenAt = t; },' +
@@ -2211,11 +2215,12 @@ await (async function () {
   check('One Tap 무응답 → 타임아웃으로 reject', !!caught && /id_token_timeout/.test(caught.message));
   check('One Tap 타임아웃 후 pending 해제', h.idPending() === false);
 
-  // (12j) idClient 가 없으면 즉시 reject — 영구 pending 금지
+  // (12j) GSI 는 로드됐는데(tokenClient 존재) idClient 가 없으면 즉시 reject — 영구 pending 금지
+  //       (로드 전 대기는 15a~15g 에서 검증)
   h = build(async function () { return resp(200, { ok: true }); }, makeClient(grants()), 25, null);
   caught = null;
   try { await h.requestIdToken(); } catch (e) { caught = e; }
-  check('idClient 없음 → 즉시 reject', !!caught && /id_client_unavailable/.test(caught.message));
+  check('로드 후 idClient 없음 → 즉시 reject', !!caught && /id_client_unavailable/.test(caught.message));
 
   // (12k) missing_token(헤더 자체가 없음)은 재취득 대상이 아니다 → 배너 없이 auth 401
   calls = [];
@@ -2243,12 +2248,88 @@ await (async function () {
   try { await h.apiCall('/api/state'); } catch (e) { caught = e; }
   check('domain_not_allowed(403) → auth 403', !!caught && caught.auth === true && caught.status === 403);
 
-  // (15) tokenClient 가 없으면(스크립트 로드 실패) 즉시 reject — 영구 pending 금지
+  // (15) tokenClient 미초기화는 "대기"다 — GSI 로드가 영영 안 되면 타임아웃으로 reject(영구 pending 금지)
   h = build(async function () { return resp(200, { ok: true }); }, null, 25);
   caught = null;
   try { await h.requestSheetsToken(''); } catch (e) { caught = e; }
-  check('tokenClient 없음 → 즉시 reject', !!caught && /token_client_unavailable/.test(caught.message));
-  check('tokenClient 없음 → pending 잔류 없음', h.pending() === false);
+  check('GSI 로드 없음 → 타임아웃으로 token_client_unavailable', !!caught && /token_client_unavailable/.test(caught.message));
+  check('GSI 타임아웃 후 pending 잔류 없음', h.pending() === false);
+
+  // (15a) 경쟁 조건 재현: tokenClient 가 아직 null 인 상태에서 요청 시작 → 늦게 GSI 로드 → 요청이 이어져 성공
+  h = build(async function () { return resp(200, { ok: true }); }, null, 200);
+  let raceState = 'pending';
+  p1 = h.requestSheetsToken('');
+  p1.then(function () { raceState = 'ok'; }, function () { raceState = 'fail'; });
+  await tick(5);
+  check('GSI 로드 전 요청 → reject 되지 않고 대기', raceState === 'pending' && h.pending() === true);
+  const lateClient = makeClient(grants('LATE'));
+  h.setTokenClient(lateClient);       // gsiLoaded() 상당: 클라이언트 초기화 후
+  h.notifyGsiLoaded();                //   대기자들을 깨운다
+  r = await p1;
+  check('늦은 GSI 로드 후 요청 이어짐 → 토큰 발급 성공', r === 'LATE1' && h.token() === 'LATE1');
+  check('늦은 로드 후 requestAccessToken 정확히 1회', lateClient.calls.length === 1);
+  check('대기를 거쳐도 prompt 인자 보존', lateClient.calls[0].prompt === '');
+  check('성공 후 pending 해제', h.pending() === false);
+
+  // (15b) 대기 중 중복 호출은 같은 요청을 공유한다(팝업 1회)
+  h = build(async function () { return resp(200, { ok: true }); }, null, 200);
+  p1 = h.requestSheetsToken('');
+  const p1b = h.requestSheetsToken('');
+  check('대기 중 중복 호출 → 같은 promise 공유', p1 === p1b);
+  const sharedClient = makeClient(grants('SH'));
+  h.setTokenClient(sharedClient);
+  h.notifyGsiLoaded();
+  const bothTok = await Promise.all([p1, p1b]);
+  check('공유 요청 → 팝업 1회, 같은 토큰', sharedClient.calls.length === 1 && bothTok[0] === 'SH1' && bothTok[1] === 'SH1');
+
+  // (15c) GSI 스크립트 로드 실패(onerror) → 대기 없이 즉시 reject
+  h = build(async function () { return resp(200, { ok: true }); }, null, 5000);
+  h.notifyGsiFailed();
+  caught = null;
+  try { await h.requestSheetsToken(''); } catch (e) { caught = e; }
+  check('GSI 로드 실패 → 즉시 token_client_unavailable', !!caught && /token_client_unavailable/.test(caught.message));
+  check('로드 실패 후 pending 잔류 없음', h.pending() === false);
+
+  // (15d) 대기 중에 로드 실패 통지가 오면 그 시점에 reject 된다
+  h = build(async function () { return resp(200, { ok: true }); }, null, 5000);
+  p1 = h.requestSheetsToken('');
+  await tick(3);
+  h.notifyGsiFailed();
+  caught = null;
+  try { await p1; } catch (e) { caught = e; }
+  check('대기 중 로드 실패 → token_client_unavailable', !!caught && /token_client_unavailable/.test(caught.message));
+
+  // (15e) 로드는 됐는데 tokenClient 가 없으면(oauth2 미탑재) 즉시 reject
+  h = build(async function () { return resp(200, { ok: true }); }, null, 5000);
+  h.notifyGsiLoaded();                // 클라이언트 주입 없이 로드 완료만 통지
+  caught = null;
+  try { await h.requestSheetsToken(''); } catch (e) { caught = e; }
+  check('로드 완료·클라이언트 없음 → 즉시 reject', !!caught && /token_client_unavailable/.test(caught.message));
+
+  // (15f) 같은 경쟁을 requestIdToken 에서도: idClient 늦은 초기화 → 재취득이 이어진다
+  let lateIdc = makeIdClient(issues('LATEID'));
+  h = build(async function () { return resp(200, { ok: true }); }, null, 200, null);
+  raceState = 'pending';
+  p1 = h.requestIdToken();
+  p1.then(function () { raceState = 'ok'; }, function () { raceState = 'fail'; });
+  await tick(5);
+  check('GSI 로드 전 ID 재취득 → reject 되지 않고 대기', raceState === 'pending' && h.idPending() === true);
+  lateIdc.deliver = h.deliverIdToken;
+  h.setIdClient(lateIdc);
+  h.notifyGsiLoaded();
+  r = await p1;
+  check('늦은 GSI 로드 후 ID 재취득 성공', r === 'LATEID1' && h.store.idToken === 'LATEID1');
+  check('늦은 로드 후 One Tap 정확히 1회', lateIdc.prompts.length === 1);
+
+  // (15g) ID 재취득 대기 중 로드 실패 → id_client_unavailable (복구 불가 → 로그인 화면 경로)
+  h = build(async function () { return resp(200, { ok: true }); }, null, 5000, null);
+  p1 = h.requestIdToken();
+  await tick(3);
+  h.notifyGsiFailed();
+  caught = null;
+  try { await p1; } catch (e) { caught = e; }
+  check('ID 대기 중 로드 실패 → id_client_unavailable', !!caught && /id_client_unavailable/.test(caught.message));
+  check('ID 실패 후 idPending 해제', h.idPending() === false);
 
   // (16) requestAccessToken 이 동기 throw 해도 reject 되고 pending 이 남지 않는다
   const throwClient = makeClient(function () { throw new Error('popup_failed_to_open'); });

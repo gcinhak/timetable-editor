@@ -5,7 +5,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>시간표 변경</title>
-<script src="https://accounts.google.com/gsi/client" onload="gsiLoaded()" async defer></script>
+<!-- 본문 끝의 메인 스크립트보다 먼저/나중 어느 쪽으로 로드돼도 안전하게:
+     아직 함수가 정의되지 않았으면 플래그만 남기고, 메인 스크립트가 나중에 보정한다. -->
+<script src="https://accounts.google.com/gsi/client"
+  onload="window.__gsiScript='loaded'; if (window.gsiLoaded) gsiLoaded();"
+  onerror="window.__gsiScript='failed'; if (window.gsiScriptFailed) gsiScriptFailed();"
+  async defer></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -573,6 +578,7 @@ var idClient = null;
 var onIdCredential = null;
 
 function gsiLoaded() {
+  if (idClient) return;   // onload 속성 경로와 파싱 후 보정 경로가 겹쳐도 1회만 초기화
   google.accounts.id.initialize({
     client_id: GOOGLE_CLIENT_ID,
     callback: function (resp) {
@@ -596,6 +602,23 @@ function gsiLoaded() {
       callback: function () {}   // requestSheetsToken 에서 매번 교체
     });
   }
+  notifyGsiLoaded();   // GSI 로드를 기다리던 토큰 요청들을 깨운다
+}
+
+/* GSI 스크립트 로드 실패 — 일시적 네트워크 오류일 수 있으니 1회만 재시도하고,
+ * 그래도 실패하면 확정 실패로 통지한다(대기 중이던 토큰 요청이 오류 메시지를 띄운다). */
+var gsiRetry = '';   // '' | 'pending'(재시도 진행 중) | 'done'(재시도까지 끝남)
+function gsiScriptFailed() {
+  if (gsiRetry === 'pending') return;   // 재시도 결과를 기다리는 중 — 중복 통지 금지
+  if (gsiRetry === 'done') { notifyGsiFailed(); return; }
+  gsiRetry = 'pending';
+  var s = document.createElement('script');
+  s.src = 'https://accounts.google.com/gsi/client';
+  s.async = true;
+  s.defer = true;
+  s.onload = function () { gsiRetry = 'done'; window.__gsiScript = 'loaded'; gsiLoaded(); };
+  s.onerror = function () { gsiRetry = 'done'; window.__gsiScript = 'failed'; notifyGsiFailed(); };
+  document.head.appendChild(s);
 }
 
 /* GIS 오류(err.type / resp.error) → 사용자 안내 문구 */
@@ -663,11 +686,57 @@ var idTokenGen = 0;                   // ID 토큰 세대 — 늦게 도착한 4
 var sheetsTokenAt = 0;                // access 토큰 발급 시각(ms). 0 = 모름
 var ACCESS_STALE_MS = 50 * 60 * 1000; // 수명 1시간보다 짧게 — 만료 가능성이 있으면 함께 갱신
 
+/* ---------- GSI 스크립트 로드 대기 브리지 ----------
+ * GSI 는 async 로 로드되므로 새로고침 직후에는 tokenClient/idClient 가 아직 null 일 수 있다.
+ * 이것은 오류가 아니라 "대기 상태" — 로드가 끝나면 이어서 진행한다.
+ * 진짜 로드 실패(onerror)·로드됐는데도 클라이언트가 없음·타임아웃일 때만 reject 한다. */
+var GSI_READY_TIMEOUT_MS = 15000;
+var gsiLoadState = 'loading';         // 'loading' | 'ready' | 'failed'
+var gsiWaiters = [];                  // 로드를 기다리는 콜백들
+
+function notifyGsiLoaded() { gsiSettle('ready'); }
+function notifyGsiFailed() { gsiSettle('failed'); }
+function gsiSettle(state) {
+  gsiLoadState = state;
+  var w = gsiWaiters;
+  gsiWaiters = [];
+  w.forEach(function (fn) { fn(); });
+}
+
+/* ready() 가 참이 될 때까지 GSI 로드를 기다린다. 로드가 끝났는데도 준비가 안 됐거나
+ * 로드 실패·타임아웃이면 reject(errName) — 기존 오류 메시지 매핑을 그대로 탄다. */
+function whenGsiReady(ready, errName) {
+  if (ready()) return Promise.resolve();
+  if (gsiLoadState !== 'loading') return Promise.reject(new Error(errName));
+  return new Promise(function (resolve, reject) {
+    var timer = setTimeout(function () {
+      var i = gsiWaiters.indexOf(waiter);
+      if (i >= 0) gsiWaiters.splice(i, 1);
+      reject(new Error(errName));
+    }, GSI_READY_TIMEOUT_MS);
+    var waiter = function () {
+      clearTimeout(timer);
+      if (ready()) resolve();
+      else reject(new Error(errName));
+    };
+    gsiWaiters.push(waiter);
+  });
+}
+
 /* GIS 토큰 요청. 반드시 클릭 제스처 안에서 호출할 것.
  * 진행 중 요청은 공유하고, 콜백이 오지 않으면 타임아웃으로 반드시 settle 한다. */
 function requestSheetsToken(promptMode) {
   if (DEV_MODE) return Promise.resolve('');
   if (tokenPending) return tokenPending;
+  if (!tokenClient) {
+    // 초기화 전이면 GSI 로드를 기다렸다가 이어서 진행(대기 중 호출은 tokenPending 으로 공유).
+    var wait = whenGsiReady(function () { return !!tokenClient; }, 'token_client_unavailable')
+      .then(function () { tokenPending = null; return requestSheetsToken(promptMode); },
+        function (e) { tokenPending = null; throw e; });
+    wait.catch(function () {});      // unhandled rejection 방지
+    tokenPending = wait;
+    return wait;
+  }
   var settled = false;
   var timer = null;
   var p = new Promise(function (resolve, reject) {
@@ -678,7 +747,6 @@ function requestSheetsToken(promptMode) {
       tokenPending = null;   // 즉시 해제 — 다음 시도가 이미 끝난 promise 를 재사용하지 않게
       fn(v);
     };
-    if (!tokenClient) { done(reject, new Error('token_client_unavailable')); return; }
     tokenClient.callback = function (resp) {
       if (resp && resp.access_token) {
         sheetsToken = resp.access_token;
@@ -710,6 +778,15 @@ function requestSheetsToken(promptMode) {
 function requestIdToken() {
   if (DEV_MODE) return Promise.resolve('');
   if (idPending) return idPending;
+  if (!idClient) {
+    // 초기화 전이면 GSI 로드를 기다렸다가 이어서 진행(대기 중 호출은 idPending 으로 공유).
+    var wait = whenGsiReady(function () { return !!idClient; }, 'id_client_unavailable')
+      .then(function () { idPending = null; return requestIdToken(); },
+        function (e) { idPending = null; throw e; });
+    wait.catch(function () {});      // unhandled rejection 방지
+    idPending = wait;
+    return wait;
+  }
   var settled = false;
   var timer = null;
   var p = new Promise(function (resolve, reject) {
@@ -721,7 +798,6 @@ function requestIdToken() {
       onIdCredential = null;   // 늦게 오는 credential 이 죽은 promise 로 흘러가지 않게
       fn(v);
     };
-    if (!idClient) { done(reject, new Error('id_client_unavailable')); return; }
     onIdCredential = function (cred) {
       if (!cred) { done(reject, new Error('id_token_failed')); return; }
       setToken(cred);
@@ -3627,6 +3703,10 @@ window.addEventListener('load', function () {
 
   document.getElementById('btnLogout').addEventListener('click', doLogout);
   if (DEV_MODE) show('btnLogout', false);   // 개발 모드에는 로그인 개념이 없다
+
+  // GSI 스크립트가 이 스크립트보다 먼저 로드/실패한 경우(함수 미정의 시점) 놓친 이벤트를 보정한다.
+  if (window.__gsiScript === 'loaded') gsiLoaded();
+  else if (window.__gsiScript === 'failed') gsiScriptFailed();
 
   if (DEV_MODE || getToken()) enterApp();
   else showLogin();
